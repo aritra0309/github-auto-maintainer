@@ -3,18 +3,31 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "github-auto-maintainer"
+name = "github-maintainer"
 version = "0.1.0"
 description = "GitHub automation agent for reviews and maintenance tasks"
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+  "anthropic>=0.49.0",
+  "openai>=1.66.0",
+  "httpx>=0.28.0",
+  "pydantic>=2.10.0",
+  "pydantic-settings>=2.8.0",
+  "structlog>=25.1.0",
+  "tenacity>=9.0.0",
+]
+
+[project.scripts]
+github-maintainer = "github_auto_maintainer.__main__:main"
 
 [project.optional-dependencies]
 dev = [
   "ruff>=0.4.0",
   "mypy>=1.10.0",
   "pytest>=8.0.0",
+  "pytest-asyncio>=0.25.0",
+  "pre-commit>=4.1.0",
 ]
 
 [tool.setuptools]
@@ -25,10 +38,10 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
@@ -37,3 +50,4 @@ show_error_codes = true
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+asyncio_mode = "auto"

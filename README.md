@@ -15,7 +15,7 @@ Automated GitHub maintenance agent that reviews pull requests, responds to issue
 2. Install dependencies:
 
 ```bash
-pip install -e .[dev]
+python -m pip install -e .[dev]
 ```
 
 3. Copy the env template and fill values:
@@ -27,10 +27,30 @@ cp .env.example .env
 4. Run tests and checks:
 
 ```bash
-ruff check .
-mypy .
-pytest
+make lint
+make test
 ```
+
+5. Run the bootstrap CLI:
+
+```bash
+make run
+```
+
+For offline local development with Ollama:
+
+```bash
+make run-local
+```
+
+## Foundation Layout
+
+- `src/github_auto_maintainer/core/` core runtime modules.
+- `src/github_auto_maintainer/skills/` skill definitions and orchestration.
+- `src/github_auto_maintainer/tools/` tool adapters and helpers.
+- `src/github_auto_maintainer/providers/` one module per provider backend.
+- `config/models.yaml` provider/model catalog for router decisions.
+- `tests/` test suite.
 
 ## Add A New Provider
 
