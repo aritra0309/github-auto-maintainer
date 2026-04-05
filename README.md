@@ -15,7 +15,7 @@ This project focuses on that control layer.
 - explicit escalation paths,
 - safe-by-default runtime behavior.
 
-## What is implemented today
+## What is implemented as of now
 
 The deterministic routing foundation is complete.
 
