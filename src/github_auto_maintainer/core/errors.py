@@ -21,3 +21,27 @@ class TransientProviderError(LLMRouterError):
 
 class NonRetryableProviderError(LLMRouterError):
     """Raised for non-retryable provider failures."""
+
+
+class ModelCatalogError(LLMRouterError):
+    """Base error for model catalog failures."""
+
+
+class ModelCatalogLoadError(ModelCatalogError):
+    """Raised when model catalog file cannot be loaded."""
+
+
+class ModelCatalogValidationError(ModelCatalogError):
+    """Raised when model catalog structure or values are invalid."""
+
+
+class RoutingPolicyError(LLMRouterError):
+    """Base error for deterministic routing policy failures."""
+
+
+class NoModelCandidateError(RoutingPolicyError):
+    """Raised when no catalog model matches routing constraints."""
+
+
+class RouterStartupValidationError(LLMRouterError):
+    """Raised when router startup validation detects invalid configuration."""
