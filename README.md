@@ -39,18 +39,28 @@ Current runtime scope:
 - The CLI (`src/github_auto_maintainer/__main__.py`) is currently bootstrap-oriented.
 - Live webhook ingestion and GitHub App event handling are not implemented yet.
 
-## How this differs from Copilot PR review
-
-Copilot PR review is a hosted review assistant focused on PR feedback quality. GitHub Auto-Maintainer targets a different layer: repository operations and automation control.
-
-Practical differences:
-
-- This project is designed as an automation backbone around GitHub events, not only a PR comment generator.
-- Routing is deterministic and policy-based; model choice is not delegated to an LLM.
-- Provider/model selection is typed and configurable across backends (`openai`, `anthropic`, `grok`, `ollama`).
-- The architecture is designed for strict guardrails (signature verification, idempotency, dry-run controls) before write actions.
-
-In short, Copilot can assist review content; this project aims to run a safe, auditable maintenance pipeline.
+## How this is different from Copilot, Claude, or Codex-style assistants
+Tools like Copilot, Claude, and Codex are great at helping a developer in the moment: writing code, reviewing changes, explaining things, and suggesting fixes.
+GitHub Auto-Maintainer is trying to solve a different problem: **what happens around the code**, not just inside a single coding session.
+Instead of acting like a smart chat assistant, this project is being built as an automation system that can react to GitHub events in a controlled way.
+What makes it different in practice:
+- It is **event-driven** (webhooks, queues, workflows), not just user-prompt driven.
+- It uses **deterministic routing rules** to choose models, so behavior is predictable and testable.
+- It supports **multiple providers** (`openai`, `anthropic`, `grok`, `ollama`) instead of being tied to one.
+- It is designed with **safety guardrails first**: signature checks, idempotency, dry-run mode, and allowlists before write actions.
+- It aims to be **auditable** so teams can understand why an action happened.
+In simple terms: Copilot/Claude/Codex help developers work faster.  
+GitHub Auto-Maintainer is being built to run a safe maintenance workflow for repositories.
+## Is this actually valuable in the real world?
+Yes, it can be — especially for teams that manage lots of PRs/issues and need control.
+Where it can shine:
+- Busy maintainers who spend too much time on repetitive triage
+- Teams that need policy control and auditability
+- Organizations that care about safety before automation writes anything
+Honest status today:
+- The foundation is strong (routing, policy, typing, tests).
+- The full webhook-to-action runtime is still being built.
+- So the right claim today is: **real potential, clear differentiation, early stage execution**.
 
 ## What we are building next
 
