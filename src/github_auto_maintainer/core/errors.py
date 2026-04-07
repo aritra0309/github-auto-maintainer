@@ -1,4 +1,4 @@
-"""Router and provider error types."""
+"""Router, provider, and skill error types."""
 
 from __future__ import annotations
 
@@ -45,3 +45,18 @@ class NoModelCandidateError(RoutingPolicyError):
 
 class RouterStartupValidationError(LLMRouterError):
     """Raised when router startup validation detects invalid configuration."""
+
+
+# ── Skill errors ──────────────────────────────────────────────────────
+
+
+class SkillError(Exception):
+    """Base error for skill execution failures."""
+
+
+class SkillExecutionError(SkillError):
+    """Raised when a skill fails during execution (e.g. GitHub client failure)."""
+
+
+class SkillResponseParsingError(SkillError):
+    """Raised when LLM response cannot be parsed into a typed decision."""

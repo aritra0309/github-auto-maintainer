@@ -1,0 +1,442 @@
+diff --git a/src/auth.py b/src/auth.py
+index 1234567..abcdefg 100644
+--- a/src/auth.py
++++ b/src/auth.py
+@@ -1,5 +1,80 @@
++"""Authentication module with comprehensive token management."""
++
++import hashlib
++import hmac
+ import jwt
++import logging
++import time
++from dataclasses import dataclass
++from typing import Any, Optional
++
++logger = logging.getLogger(__name__)
++
++SECRET_KEY = "changeme"
++EXPECTED_AUDIENCE = "github-auto-maintainer"
++REVOKED_TOKENS: set[str] = set()
++TOKEN_BLACKLIST_TTL = 86400
++MAX_TOKEN_AGE = 3600
++
++
++@dataclass
++class TokenPayload:
++    sub: str
++    exp: float
++    iat: float
++    jti: Optional[str] = None
++    aud: Optional[str] = None
++    scope: Optional[str] = None
++
++
++def create_token(payload: dict[str, Any], ttl: int = 3600) -> str:
++    now = time.time()
++    full_payload = {
++        **payload,
++        "iat": now,
++        "exp": now + ttl,
++        "aud": EXPECTED_AUDIENCE,
++    }
++    return jwt.encode(full_payload, SECRET_KEY)
++
+ 
+ def validate_token(token):
++    """Validate and decode a JWT token with comprehensive checks."""
++    if token is None:
++        raise ValueError("Token cannot be None")
++    if not isinstance(token, str):
++        raise TypeError("Token must be a string")
++    if len(token) > 10000:
++        raise ValueError("Token exceeds maximum length")
+     decoded = jwt.decode(token, SECRET_KEY)
++    if decoded.get("exp") is None:
++        raise ValueError("Token missing expiration")
++    if decoded.get("iat") is None:
++        raise ValueError("Token missing issued-at")
++    if decoded.get("sub") is None:
++        raise ValueError("Token missing subject")
++    now = time.time()
++    if decoded["exp"] < now:
++        raise TokenExpiredError("Token has expired")
++    if decoded["iat"] > now:
++        raise ValueError("Token issued in the future")
++    if decoded["iat"] < now - MAX_TOKEN_AGE:
++        raise ValueError("Token too old")
++    if decoded.get("aud") != EXPECTED_AUDIENCE:
++        raise ValueError("Invalid audience")
++    if is_token_revoked_by_jti(decoded.get("jti")):
++        raise TokenRevokedError("Token has been revoked")
++    logger.info("Token validated for subject=%s", decoded["sub"])
+     return decoded
++
++
++def refresh_token(token):
++    """Refresh an existing valid token."""
++    decoded = validate_token(token)
++    new_payload = {k: v for k, v in decoded.items() if k not in ("exp", "iat")}
++    return create_token(new_payload)
++
++
++def revoke_token(token):
++    decoded = validate_token(token)
++    token_id = decoded.get("jti")
++    if token_id is None:
++        raise ValueError("Token missing JTI for revocation")
++    REVOKED_TOKENS.add(token_id)
++    logger.info("Token revoked: jti=%s", token_id)
++    return True
++
++
++def is_token_revoked(token):
++    decoded = jwt.decode(token, SECRET_KEY, options={"verify_exp": False})
++    return is_token_revoked_by_jti(decoded.get("jti"))
++
++
++def is_token_revoked_by_jti(jti):
++    if jti is None:
++        return False
++    return jti in REVOKED_TOKENS
+diff --git a/src/models.py b/src/models.py
+index aaaaaaa..bbbbbbb 100644
+--- a/src/models.py
++++ b/src/models.py
+@@ -1,5 +1,60 @@
++"""Data models for the application."""
++
++import re
++from dataclasses import dataclass, field
++from datetime import datetime
++from typing import Optional
++
++
++@dataclass
+ class User:
+-    def __init__(self, name, email):
+-        self.name = name
+-        self.email = email
++    name: str
++    email: str
++    is_active: bool = True
++    created_at: datetime = field(default_factory=datetime.utcnow)
++    last_login: Optional[datetime] = None
++    role: str = "user"
++
++    def deactivate(self):
++        self.is_active = False
++        return self
++
++    def activate(self):
++        self.is_active = True
++        return self
++
++    def update_login(self):
++        self.last_login = datetime.utcnow()
++        return self
++
++    def is_admin(self):
++        return self.role == "admin"
++
++    def validate_email(self):
++        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
++        return bool(re.match(pattern, self.email))
++
++
++@dataclass
++class Session:
++    user: User
++    token: str
++    created_at: datetime = field(default_factory=datetime.utcnow)
++    expires_at: Optional[datetime] = None
++    is_valid: bool = True
++
++    def invalidate(self):
++        self.is_valid = False
++        return self
++
++    def is_expired(self):
++        if self.expires_at is None:
++            return False
++        return datetime.utcnow() > self.expires_at
++
++
++@dataclass
++class AuditLog:
++    user: User
++    action: str
++    timestamp: datetime = field(default_factory=datetime.utcnow)
++    details: Optional[str] = None
+diff --git a/src/routes.py b/src/routes.py
+index ccccccc..ddddddd 100644
+--- a/src/routes.py
++++ b/src/routes.py
+@@ -1,10 +1,80 @@
++"""HTTP route handlers."""
++
++import logging
++from functools import wraps
++
++logger = logging.getLogger(__name__)
++
++
++def require_auth(f):
++    @wraps(f)
++    def wrapper(*args, **kwargs):
++        token = request.headers.get("Authorization")
++        if token is None:
++            return {"error": "Missing token"}, 401
++        try:
++            decoded = validate_token(token)
++        except Exception as e:
++            return {"error": str(e)}, 401
++        request.user = decoded
++        return f(*args, **kwargs)
++    return wrapper
++
++
++def require_admin(f):
++    @wraps(f)
++    def wrapper(*args, **kwargs):
++        if not getattr(request, "user", {}).get("role") == "admin":
++            return {"error": "Admin required"}, 403
++        return f(*args, **kwargs)
++    return wrapper
++
++
+ def login():
+     user = authenticate(request.json)
+     token = create_token(user)
++    logger.info("User logged in: %s", user.get("sub"))
+     return {"token": token}
+ 
++
++def logout():
++    token = request.headers.get("Authorization")
++    if token is None:
++        return {"error": "Missing token"}, 401
++    try:
++        revoke_token(token)
++    except ValueError as e:
++        return {"error": str(e)}, 400
++    return {"status": "logged out"}
++
++
++@require_auth
++def whoami():
++    return {"user": request.user["sub"], "role": request.user.get("role", "user")}
++
++
++@require_auth
++@require_admin
++def list_users():
++    users = get_all_users()
++    return {"users": [{"name": u.name, "email": u.email} for u in users]}
++
++
++@require_auth
++def update_profile():
++    data = request.json
++    user = get_user(request.user["sub"])
++    if "email" in data:
++        user.email = data["email"]
++        if not user.validate_email():
++            return {"error": "Invalid email"}, 400
++    if "name" in data:
++        user.name = data["name"]
++    save_user(user)
++    return {"status": "updated"}
++
++
+ def register():
+-    pass
++    data = request.json
++    if not data.get("email") or not data.get("name"):
++        return {"error": "Missing required fields"}, 400
++    user = User(name=data["name"], email=data["email"])
++    if not user.validate_email():
++        return {"error": "Invalid email"}, 400
++    save_user(user)
++    token = create_token({"sub": user.name})
++    return {"token": token}, 201
+diff --git a/src/middleware.py b/src/middleware.py
+new file mode 100644
+--- /dev/null
++++ b/src/middleware.py
+@@ -0,0 +1,40 @@
++"""Request middleware for logging and rate limiting."""
++
++import logging
++import time
++from collections import defaultdict
++
++logger = logging.getLogger(__name__)
++
++REQUEST_COUNTS: dict[str, list[float]] = defaultdict(list)
++RATE_LIMIT_WINDOW = 60
++RATE_LIMIT_MAX = 100
++
++
++def rate_limit_middleware(request, call_next):
++    client_ip = request.client.host
++    now = time.time()
++    REQUEST_COUNTS[client_ip] = [
++        t for t in REQUEST_COUNTS[client_ip] if t > now - RATE_LIMIT_WINDOW
++    ]
++    if len(REQUEST_COUNTS[client_ip]) >= RATE_LIMIT_MAX:
++        return {"error": "Rate limit exceeded"}, 429
++    REQUEST_COUNTS[client_ip].append(now)
++    return call_next(request)
++
++
++def logging_middleware(request, call_next):
++    start = time.time()
++    response = call_next(request)
++    elapsed = time.time() - start
++    logger.info(
++        "method=%s path=%s status=%s elapsed=%.3fs",
++        request.method,
++        request.url.path,
++        getattr(response, "status_code", "?"),
++        elapsed,
++    )
++    return response
++
++
++def error_handler(request, exc):
++    logger.exception("Unhandled error: %s", exc)
++    return {"error": "Internal server error"}, 500
+diff --git a/src/utils.py b/src/utils.py
+new file mode 100644
+--- /dev/null
++++ b/src/utils.py
+@@ -0,0 +1,25 @@
++"""Shared utility functions."""
++
++import hashlib
++import secrets
++import string
++
++
++def generate_id(length: int = 16) -> str:
++    alphabet = string.ascii_lowercase + string.digits
++    return "".join(secrets.choice(alphabet) for _ in range(length))
++
++
++def hash_password(password: str, salt: str | None = None) -> tuple[str, str]:
++    if salt is None:
++        salt = secrets.token_hex(16)
++    hashed = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 100000)
++    return hashed.hex(), salt
++
++
++def verify_password(password: str, hashed: str, salt: str) -> bool:
++    computed, _ = hash_password(password, salt)
++    return secrets.compare_digest(computed, hashed)
++
++
++def truncate(text: str, max_length: int = 100) -> str:
++    return text[:max_length] + "..." if len(text) > max_length else text
+diff --git a/tests/test_auth.py b/tests/test_auth.py
+index eeeeeee..fffffff 100644
+--- a/tests/test_auth.py
++++ b/tests/test_auth.py
+@@ -1,12 +1,80 @@
++"""Comprehensive authentication tests."""
++
+ import pytest
++import time
+ import jwt
+ 
++
+ def test_validate_token():
+     token = create_token({"sub": "user1"})
+     result = validate_token(token)
+     assert result["sub"] == "user1"
++
++
++def test_validate_token_none():
++    with pytest.raises(ValueError, match="cannot be None"):
++        validate_token(None)
++
++
++def test_validate_token_not_string():
++    with pytest.raises(TypeError, match="must be a string"):
++        validate_token(12345)
++
++
++def test_validate_token_too_long():
++    with pytest.raises(ValueError, match="exceeds maximum"):
++        validate_token("x" * 10001)
++
++
++def test_validate_token_missing_exp():
++    token = jwt.encode({"sub": "user1"}, SECRET_KEY)
++    with pytest.raises(ValueError, match="missing expiration"):
++        validate_token(token)
++
++
++def test_validate_token_expired():
++    token = jwt.encode({"sub": "user1", "exp": 0, "iat": 0}, SECRET_KEY)
++    with pytest.raises(TokenExpiredError):
++        validate_token(token)
++
++
++def test_validate_token_future_iat():
++    token = jwt.encode({"sub": "user1", "exp": time.time() + 3600, "iat": time.time() + 3600}, SECRET_KEY)
++    with pytest.raises(ValueError, match="issued in the future"):
++        validate_token(token)
++
++
++def test_validate_token_invalid_audience():
++    token = jwt.encode({"sub": "user1", "exp": time.time() + 3600, "iat": time.time(), "aud": "wrong"}, SECRET_KEY)
++    with pytest.raises(ValueError, match="Invalid audience"):
++        validate_token(token)
++
++
++def test_create_token_default_ttl():
++    token = create_token({"sub": "user1"})
++    decoded = jwt.decode(token, SECRET_KEY, algorithms=["HS256"], audience=EXPECTED_AUDIENCE)
++    assert decoded["sub"] == "user1"
++    assert decoded["aud"] == EXPECTED_AUDIENCE
++
++
+ def test_revoke_token():
+     token = create_token({"sub": "user1", "jti": "abc123"})
+     assert revoke_token(token) is True
+     assert is_token_revoked(token) is True
++
++
++def test_revoke_token_missing_jti():
++    token = create_token({"sub": "user1"})
++    with pytest.raises(ValueError, match="missing JTI"):
++        revoke_token(token)
++
++
++def test_is_token_revoked_no_jti():
++    token = create_token({"sub": "user1"})
++    assert is_token_revoked(token) is False
++
++
++def test_refresh_token():
++    token = create_token({"sub": "user1", "jti": "refresh1"})
++    new_token = refresh_token(token)
++    decoded = jwt.decode(new_token, SECRET_KEY, algorithms=["HS256"], audience=EXPECTED_AUDIENCE)
++    assert decoded["sub"] == "user1"
++
++
++def test_user_model():
++    user = User(name="test", email="test@example.com")
++    assert user.is_active is True
++    user.deactivate()
++    assert user.is_active is False
++    user.activate()
++    assert user.is_active is True
++
++
++def test_user_validate_email():
++    user = User(name="test", email="test@example.com")
++    assert user.validate_email() is True
++    user.email = "invalid"
++    assert user.validate_email() is False

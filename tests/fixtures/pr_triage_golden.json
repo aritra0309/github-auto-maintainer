@@ -1,0 +1,8 @@
+{
+  "priority": "medium",
+  "category": "bug_fix",
+  "suggested_labels": ["bug", "auth"],
+  "suggested_reviewers": ["maintainer1"],
+  "risk_assessment": "medium",
+  "summary": "Fixes a null pointer exception in the auth module by adding expiration validation."
+}

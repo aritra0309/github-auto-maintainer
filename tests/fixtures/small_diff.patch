@@ -1,0 +1,13 @@
+diff --git a/src/auth.py b/src/auth.py
+index 1234567..abcdefg 100644
+--- a/src/auth.py
++++ b/src/auth.py
+@@ -10,6 +10,8 @@ def validate_token(token):
+     if token is None:
+         raise ValueError("Token cannot be None")
+     decoded = jwt.decode(token, SECRET_KEY)
++    if decoded.get("exp") is None:
++        raise ValueError("Token missing expiration")
+     return decoded
+ 
+ def refresh_token(token):

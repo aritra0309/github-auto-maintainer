@@ -1,0 +1,24 @@
+{
+  "action": "opened",
+  "number": 42,
+  "pull_request": {
+    "number": 42,
+    "title": "Fix null pointer in auth module",
+    "body": "This PR fixes a null pointer exception in the auth module when token is expired.",
+    "state": "open",
+    "user": {"login": "contributor1"},
+    "head": {"sha": "abc123def456", "ref": "fix/null-pointer"},
+    "base": {"ref": "main"},
+    "labels": [{"name": "bug"}],
+    "created_at": "2026-04-07T10:00:00Z",
+    "updated_at": "2026-04-07T10:00:00Z"
+  },
+  "repository": {
+    "id": 12345,
+    "name": "hello-world",
+    "full_name": "octocat/hello-world",
+    "owner": {"login": "octocat"}
+  },
+  "installation": {"id": 9876},
+  "sender": {"login": "contributor1"}
+}

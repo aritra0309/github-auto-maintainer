@@ -1,0 +1,124 @@
+diff --git a/src/auth.py b/src/auth.py
+index 1234567..abcdefg 100644
+--- a/src/auth.py
++++ b/src/auth.py
+@@ -10,6 +10,20 @@ def validate_token(token):
+     if token is None:
+         raise ValueError("Token cannot be None")
+     decoded = jwt.decode(token, SECRET_KEY)
++    if decoded.get("exp") is None:
++        raise ValueError("Token missing expiration")
++    if decoded.get("iat") is None:
++        raise ValueError("Token missing issued-at")
++    if decoded.get("sub") is None:
++        raise ValueError("Token missing subject")
++    now = time.time()
++    if decoded["exp"] < now:
++        raise TokenExpiredError("Token has expired")
++    if decoded["iat"] > now:
++        raise ValueError("Token issued in the future")
++    if decoded.get("aud") != EXPECTED_AUDIENCE:
++        raise ValueError("Invalid audience")
++    logger.info("Token validated for subject=%s", decoded["sub"])
+     return decoded
+ 
+ def refresh_token(token):
+@@ -30,3 +44,25 @@ def refresh_token(token):
+     new_token = jwt.encode(payload, SECRET_KEY)
+     return new_token
++
++
++def revoke_token(token):
++    """Revoke an active token."""
++    decoded = validate_token(token)
++    token_id = decoded.get("jti")
++    if token_id is None:
++        raise ValueError("Token missing JTI for revocation")
++    REVOKED_TOKENS.add(token_id)
++    logger.info("Token revoked: jti=%s", token_id)
++    return True
++
++
++def is_token_revoked(token):
++    """Check if a token has been revoked."""
++    decoded = jwt.decode(token, SECRET_KEY, options={"verify_exp": False})
++    token_id = decoded.get("jti")
++    if token_id is None:
++        return False
++    return token_id in REVOKED_TOKENS
+diff --git a/src/models.py b/src/models.py
+index aaaaaaa..bbbbbbb 100644
+--- a/src/models.py
++++ b/src/models.py
+@@ -1,5 +1,10 @@
+ class User:
+     def __init__(self, name, email):
+         self.name = name
+         self.email = email
++        self.is_active = True
++
++    def deactivate(self):
++        self.is_active = False
++        return self
+diff --git a/src/routes.py b/src/routes.py
+index ccccccc..ddddddd 100644
+--- a/src/routes.py
++++ b/src/routes.py
+@@ -5,6 +5,18 @@ def login():
+     token = create_token(user)
+     return {"token": token}
+ 
++def logout():
++    token = request.headers.get("Authorization")
++    if token is None:
++        return {"error": "Missing token"}, 401
++    try:
++        revoke_token(token)
++    except ValueError as e:
++        return {"error": str(e)}, 400
++    return {"status": "logged out"}
++
++def whoami():
++    token = request.headers.get("Authorization")
++    if token is None:
++        return {"error": "Missing token"}, 401
++    decoded = validate_token(token)
++    return {"user": decoded["sub"]}
+ 
+ def register():
+diff --git a/tests/test_auth.py b/tests/test_auth.py
+index eeeeeee..fffffff 100644
+--- a/tests/test_auth.py
++++ b/tests/test_auth.py
+@@ -10,3 +10,30 @@ def test_validate_token():
+     token = create_token({"sub": "user1"})
+     result = validate_token(token)
+     assert result["sub"] == "user1"
++
++def test_validate_token_missing_exp():
++    token = jwt.encode({"sub": "user1"}, SECRET_KEY)
++    with pytest.raises(ValueError, match="missing expiration"):
++        validate_token(token)
++
++def test_validate_token_expired():
++    token = jwt.encode({"sub": "user1", "exp": 0, "iat": 0}, SECRET_KEY)
++    with pytest.raises(TokenExpiredError):
++        validate_token(token)
++
++def test_revoke_token():
++    token = create_token({"sub": "user1", "jti": "abc123"})
++    assert revoke_token(token) is True
++    assert is_token_revoked(token) is True
++
++def test_revoke_token_missing_jti():
++    token = create_token({"sub": "user1"})
++    with pytest.raises(ValueError, match="missing JTI"):
++        revoke_token(token)
++
++def test_is_token_revoked_no_jti():
++    token = create_token({"sub": "user1"})
++    assert is_token_revoked(token) is False
++
++def test_is_token_revoked_not_revoked():
++    token = create_token({"sub": "user1", "jti": "fresh123"})
++    assert is_token_revoked(token) is False

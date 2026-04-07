@@ -1,0 +1,7 @@
+{
+  "priority": "high",
+  "category": "bug_report",
+  "suggested_labels": ["bug", "login"],
+  "needs_more_info": false,
+  "summary": "User reports a 500 error on the login page, likely a server-side bug that needs investigation."
+}

@@ -1,0 +1,21 @@
+{
+  "action": "opened",
+  "issue": {
+    "number": 101,
+    "title": "Login page returns 500 error",
+    "body": "When I try to log in with my credentials, the page returns a 500 Internal Server Error.",
+    "state": "open",
+    "user": {"login": "reporter1"},
+    "labels": [{"name": "bug"}],
+    "created_at": "2026-04-07T09:00:00Z",
+    "updated_at": "2026-04-07T09:00:00Z"
+  },
+  "repository": {
+    "id": 12345,
+    "name": "hello-world",
+    "full_name": "octocat/hello-world",
+    "owner": {"login": "octocat"}
+  },
+  "installation": {"id": 9876},
+  "sender": {"login": "reporter1"}
+}
