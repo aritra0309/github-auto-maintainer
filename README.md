@@ -1,146 +1,177 @@
 # GitHub Auto-Maintainer
 
-GitHub Auto-Maintainer is a policy-driven automation project for repository maintenance. It is built to reduce repetitive maintainer work such as triage, routing, summarization, and follow-up actions while keeping behavior deterministic, testable, and safe.
+A policy-driven automation system for GitHub repository maintenance. It reduces repetitive maintainer work — triage, routing, summarization, labeling, and follow-up — while keeping behavior deterministic, testable, and safe.
 
-This repository is being built as an engineering-first system: strict typing, deterministic model selection, explicit safety gates, and clear separation between policy and execution.
+Built with strict typing, deterministic model selection, explicit safety gates, and clear separation between policy and execution.
 
 ## Why this project exists
 
-Maintainers spend substantial time on repeatable but important work: understanding incoming issues and pull requests, prioritizing what to review first, and keeping discussions actionable. AI can help, but in real engineering teams the bigger challenge is not raw generation quality; it is reliability, auditability, and operational control.
+Maintainers spend substantial time on repeatable but important work: understanding incoming issues and pull requests, prioritizing what to review first, and keeping discussions actionable. AI can help, but in real engineering teams the bigger challenge is not raw generation quality — it is reliability, auditability, and operational control.
 
-This project focuses on that control layer.
+This project focuses on that control layer:
 
-- predictable routing decisions,
-- provider and model portability,
-- explicit escalation paths,
-- safe-by-default runtime behavior.
+- Predictable, policy-driven routing decisions
+- Provider and model portability (OpenAI, Anthropic, Grok, Ollama)
+- Explicit escalation paths when models fail to produce valid output
+- Safe-by-default runtime behavior with mandatory dry-run mode
 
-## What is implemented as of now
+## How it differs from Copilot, Claude, or Codex-style assistants
 
-The deterministic routing foundation is complete.
+Tools like Copilot, Claude, and Codex help a developer in the moment — writing code, reviewing changes, suggesting fixes. GitHub Auto-Maintainer solves a different problem: **what happens around the code**, not inside a single coding session.
 
-Core additions and updates:
+- **Event-driven** (webhooks → queue → orchestrator), not prompt-driven
+- **Deterministic model routing** — model choice is never delegated to an LLM
+- **Multi-provider** — OpenAI, Anthropic, Grok, and Ollama, swappable per task type
+- **Safety-first** — signature verification, idempotency, dry-run mode, and allowlists before any write action
+- **Auditable** — structured logging of every routing decision, skill result, and action outcome
 
-- `src/github_auto_maintainer/core/settings.py` provides typed runtime settings via `pydantic-settings`.
-- `src/github_auto_maintainer/core/model_catalog.py` loads and validates `config/models.yaml` into typed descriptors.
-- `src/github_auto_maintainer/core/task_types.py` defines `TaskType` and `TaskComplexity` enums.
-- `src/github_auto_maintainer/core/routing_policy.py` implements deterministic model ranking/selection and fixed escalation order.
-- `src/github_auto_maintainer/core/llm_router.py` now supports:
-  - `complete_task(...)` for task-intent-based routing,
-  - `complete_with_escalation(...)` for deterministic tier escalation.
-- `.env.example` and defaults are aligned to:
-  - `DEFAULT_PROVIDER=openai`
-  - `DEFAULT_MODEL=gpt-5.4-mini`
+## What is implemented
 
-Quality and validation coverage in `tests/` includes catalog parsing failures, routing behavior, escalation scenarios with fake providers/validators, and startup validation checks.
+### Phase 1 — Deterministic Routing + Typed Settings ✅
 
-Current runtime scope:
+Model catalog, typed settings, task types, routing policy. LLM router with `complete()`, `complete_task()`, and `complete_with_escalation()`. Hook bus for observability. Four provider adapters. Error hierarchy, startup validation, frozen dataclass value objects.
 
-- The CLI (`src/github_auto_maintainer/__main__.py`) is currently bootstrap-oriented.
-- Live webhook ingestion and GitHub App event handling are not implemented yet.
+### Phase 2 — Webhook Ingress + GitHub App Auth + Queue ✅
 
-## How this is different from Copilot, Claude, or Codex-style assistants
-Tools like Copilot, Claude, and Codex are great at helping a developer in the moment: writing code, reviewing changes, explaining things, and suggesting fixes.
-GitHub Auto-Maintainer is trying to solve a different problem: **what happens around the code**, not just inside a single coding session.
-Instead of acting like a smart chat assistant, this project is being built as an automation system that can react to GitHub events in a controlled way.
-What makes it different in practice:
-- It is **event-driven** (webhooks, queues, workflows), not just user-prompt driven.
-- It uses **deterministic routing rules** to choose models, so behavior is predictable and testable.
-- It supports **multiple providers** (`openai`, `anthropic`, `grok`, `ollama`) instead of being tied to one.
-- It is designed with **safety guardrails first**: signature checks, idempotency, dry-run mode, and allowlists before write actions.
-- It aims to be **auditable** so teams can understand why an action happened.
-In simple terms: Copilot/Claude/Codex help developers work faster.  
-GitHub Auto-Maintainer is being built to run a safe maintenance workflow for repositories.
-## Is this actually valuable in the real world?
-Yes, it can be — especially for teams that manage lots of PRs/issues and need control.
-Where it can shine:
-- Busy maintainers who spend too much time on repetitive triage
-- Teams that need policy control and auditability
-- Organizations that care about safety before automation writes anything
-Honest status today:
-- The foundation is strong (routing, policy, typing, tests).
-- The full webhook-to-action runtime is still being built.
-- So the right claim today is: **real potential, clear differentiation, early stage execution**.
+FastAPI ingress with `/health` and `/webhook` endpoints. HMAC SHA-256 signature verification. GitHub App JWT generation and installation token retrieval. Event normalization into typed `NormalizedEvent` envelopes. In-memory async job queue (swappable for Redis/Celery).
 
-## What we are building next
+### Phase 3 — GitHub Client + Diff Parser + Read-Only Skills ✅
 
-The next stage is converting this routing core into a real GitHub event runtime.
+Async GitHub REST client with typed return objects, pagination, and error mapping. Pure unified diff parser. Skill framework with `SkillContext`, generic `SkillResult[T]`, and `BaseSkill` ABC. Two read-only triage skills (PR and issue). Prompt templates loaded via `importlib.resources`.
 
-First, the system will add secure webhook ingress with GitHub App authentication, event normalization, and a queue boundary. Incoming events should be verified and enqueued quickly, with heavier reasoning handled asynchronously.
+### Phase 4 — Orchestrator + First Write Actions (Idempotent) ✅
 
-Then the project will add a typed GitHub REST client, diff parsing, and read-only triage skills for pull requests and issues. That stage is intentionally non-mutating so behavior can be evaluated on real payloads without risk.
+Full orchestrator replacing the Phase 3 dispatcher. Three write-capable skills:
 
-After read-only behavior stabilizes, write actions will be introduced with hard safeguards: idempotency, dry-run mode, and repository/event allowlists. Initial write actions will focus on low-risk value such as summary comments and labels.
+| Skill | Trigger | Action |
+|---|---|---|
+| **PRSummarySkill** | `pull_request.opened` | Posts a review summary comment on the PR |
+| **IssueLabelSkill** | `issues.opened` | Adds classification labels to the issue |
+| **IssueResponseSkill** | `issues.opened` | Posts an initial triage response comment |
 
-Only after those controls are proven will controlled auto-fix workflows be added (generate patch, run checks, open PR) with strict safety constraints and human approval required for merge.
+Safety layer:
+- **Action protocol** — typed `ActionRequest` with deterministic fingerprinting
+- **Idempotency** — delivery ID + action fingerprint prevents duplicate writes
+- **Dry-run mode** — enabled by default; writes are blocked until explicitly turned off
+- **Allowlist gating** — repo and event type allowlists checked before skill execution (saves LLM/API cost)
+- **Fault isolation** — one skill or action failure does not stop others in the same event
 
-Deployment, observability, and runbooks will follow so the system is reproducible, operable, and understandable by new users.
+**211 tests** pass across unit, skill, orchestrator, and integration test suites.
 
-## Engineering and safety contract
+## End-to-end request flow
 
-Project constraints:
+```
+GitHub webhook
+  → FastAPI ingress (HMAC signature verification)
+  → Event normalization → NormalizedEvent
+  → Async job queue
+  → Orchestrator
+      → Allowlist check (repo + event type)
+      → Match event to skills
+      → GitHub App JWT → installation token → GitHubClient
+      → Execute skills, collect planned actions
+      → Execute actions (idempotency check → dry-run gate → write)
+      → Structured JSON logging of every outcome
+```
 
-- Python `>=3.12`
-- quality gates: `ruff`, `mypy` (strict), `pytest`
-- asynchronous architecture for runtime paths
-- phased execution: one capability group at a time, with tests first
+## What is next
 
-Safety requirements for operational flows:
+**Phase 5 — Controlled Auto-Fix Pipeline**: Patch worker, git operations (branch/commit/PR), safety rules (path/diff/size guards), allowed command templates only (ruff, mypy, pytest — no arbitrary execution), run metadata persistence (SQLite).
 
-- webhook signature verification before processing,
-- idempotency before any GitHub write action,
-- mandatory `DRY_RUN` before enabling writes,
-- no secrets in logs.
+**Phase 6 — Deployment + Observability**: Dockerfile, docker-compose, metrics/logging, container smoke tests, staging repo soak tests.
 
 ## Run locally
 
-1. Create and activate a Python environment.
-2. Install dependencies:
-
 ```bash
+# Install (editable, with dev deps)
 python -m pip install -e '.[dev]'
-```
 
-3. Copy the env template and set values:
-
-```bash
+# Copy env template and set values
 cp .env.example .env
-```
 
-Default router settings:
-
-- `DEFAULT_PROVIDER=openai`
-- `DEFAULT_MODEL=gpt-5.4-mini`
-- `MODEL_CATALOG_PATH` optional override (defaults to `config/models.yaml`)
-
-4. Run checks:
-
-```bash
+# Lint (ruff + mypy strict)
 make lint
+
+# Run all tests
 make test
-```
 
-5. Run bootstrap CLI validation:
-
-```bash
+# Start the server (dry-run mode by default)
 make run
-```
+# or: python -m github_auto_maintainer
 
-For local/offline model development with Ollama:
-
-```bash
+# Local/offline mode with Ollama
 make run-local
 ```
 
+### Key environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `DEFAULT_PROVIDER` | `openai` | LLM provider for routing |
+| `DEFAULT_MODEL` | `gpt-5.4-mini` | Default model name |
+| `GITHUB_APP_ID` | — | GitHub App ID |
+| `GITHUB_PRIVATE_KEY` | — | GitHub App private key (PEM) |
+| `GITHUB_WEBHOOK_SECRET` | — | Webhook HMAC secret |
+| `DRY_RUN` | `true` | Block all GitHub writes when `true` |
+| `GITHUB_ALLOWED_REPOSITORIES` | _(empty = allow all)_ | Comma-separated repo allowlist |
+| `GITHUB_ALLOWED_EVENTS` | _(empty = allow all)_ | Comma-separated event allowlist |
+
 ## Repository layout
 
-- `src/github_auto_maintainer/core/` runtime core (routing, settings, policy, hooks)
-- `src/github_auto_maintainer/providers/` provider adapters
-- `src/github_auto_maintainer/skills/` skill modules
-- `src/github_auto_maintainer/tools/` helper integrations
-- `config/models.yaml` model catalog used by routing policy
-- `tests/` unit and integration tests
+```
+src/github_auto_maintainer/
+├── core/                  # Runtime core
+│   ├── orchestrator.py    # Event-to-action pipeline
+│   ├── llm_router.py      # Deterministic model routing
+│   ├── routing_policy.py   # Multi-key model ranking
+│   ├── actions.py          # Action protocol + concrete types
+│   ├── action_policy.py    # Dry-run, allowlists
+│   ├── idempotency.py      # Deduplication layer
+│   ├── job_queue.py        # Async queue abstraction
+│   ├── model_catalog.py    # YAML model descriptors
+│   ├── task_types.py       # TaskType + TaskComplexity enums
+│   ├── hooks.py            # LLM observability hooks
+│   └── settings.py         # Typed runtime settings
+├── github/                # GitHub integration
+│   ├── client.py           # Async REST client (read + write)
+│   ├── auth.py             # App JWT + installation tokens
+│   ├── events.py           # Event normalization
+│   ├── diff_parser.py      # Unified diff parser
+│   └── errors.py           # GitHub error hierarchy
+├── server/                # FastAPI application
+│   ├── app.py              # Ingress + lifespan wiring
+│   └── webhooks.py         # HMAC signature verification
+├── skills/                # Event processing skills
+│   ├── pr_summary.py       # PR review summary (write)
+│   ├── issue_label.py      # Issue labeling (write)
+│   ├── issue_response.py   # Issue response (write)
+│   ├── pr_triage.py        # PR triage (read-only)
+│   ├── issue_triage.py     # Issue triage (read-only)
+│   ├── decisions.py        # Typed LLM output parsing
+│   ├── payload.py          # Webhook payload extraction
+│   └── base.py             # Skill framework
+├── prompts/               # LLM prompt templates (.md)
+├── providers/             # LLM provider adapters
+│   ├── openai.py, anthropic.py, grok.py, ollama.py
+│   └── base.py
+└── tools/                 # Helper integrations
 
-## Current maturity snapshot
+config/models.yaml          # Model catalog
+tests/                      # 211 tests (unit, skill, orchestrator, integration)
+```
 
-Today this repository is a strong deterministic foundation with test coverage. The GitHub event runtime and write-capable automation layers are the next major capabilities being built.
+## Engineering and safety contract
+
+**Constraints:**
+- Python ≥3.12, mypy strict, ruff, pytest
+- Frozen dataclasses for all value objects
+- Async architecture for all runtime paths
+- Phased execution: one capability group at a time, tests first
+
+**Safety requirements:**
+- Webhook signature verification before processing
+- Idempotency before any GitHub write (delivery ID + action fingerprint)
+- Mandatory dry-run mode before enabling writes
+- Allowlist gating before skill execution
+- Action fault isolation (one failure does not stop others)
+- No secrets in logs

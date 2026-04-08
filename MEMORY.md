@@ -6,7 +6,7 @@ Project state and decisions for GitHub Auto-Maintainer. Updated as phases comple
 
 **Phases 1–4 complete.** All code passes `make lint` (ruff + mypy strict) and `make test` (211 tests).
 
-Phase 4 is uncommitted — all new files are untracked or modified in the working tree.
+Latest commit: `4d3043c` — Phase 4: Orchestrator + first write actions (idempotent).
 
 ## Key Decisions Made
 
@@ -16,10 +16,8 @@ Phase 4 is uncommitted — all new files are untracked or modified in the workin
 - PR size thresholds: small (<50 changed lines, ≤3 files), medium (<300 changed lines, ≤10 files), large (everything else).
 
 ### Dispatcher Design (Phase 3)
-- Minimal event-to-skill dispatcher, not the full Phase 4 orchestrator.
-- Lifespan-managed async task consuming the same in-memory queue as `server/app.py`.
-- Sequential skill execution per event. No idempotency, no action policy, no writes.
-- Explicit skill list passed into dispatcher — no auto-discovery or plugin system.
+- Minimal event-to-skill dispatcher, superseded by the Phase 4 orchestrator.
+- `core/skill_dispatcher.py` retained for reference but no longer wired into runtime.
 
 ### Token Handling (Phase 3)
 - Per-event fresh installation token. New `GitHubClient` created per event as an async context manager.

@@ -91,7 +91,7 @@ python -m pytest tests/core/test_llm_router.py
 # Run a single test by name
 python -m pytest tests/core/test_llm_router.py -k test_router_uses_defaults
 
-# Bootstrap CLI validation (checks DEFAULT_PROVIDER/DEFAULT_MODEL against catalog)
+# Start the server (validates config, then runs uvicorn on port 8000)
 make run
 
 # Local/offline mode with Ollama
@@ -243,6 +243,5 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on PRs and pushes to main: star
 - `e02bd9f` — Established the multi-provider LLM runtime foundation.
 - `aa5643e` — Completed the deterministic routing foundation and documented the phased roadmap.
 - `89c358f` — Rewrote the README with clearer project narrative and implementation context.
-- Phase 2 (uncommitted) — Added webhook ingress, GitHub App auth, event normalization, async queue.
-- Phase 3 (uncommitted) — Added GitHub client, diff parser, skill framework, read-only triage skills, dispatcher.
-- Phase 4 (uncommitted) — Added orchestrator, write actions, idempotency, action policy, write skills, integration tests.
+- `720ef50` — Added triage skills and server workflow (Phases 2–3).
+- `4d3043c` — Phase 4: Orchestrator, write actions, idempotency, action policy, integration tests.
