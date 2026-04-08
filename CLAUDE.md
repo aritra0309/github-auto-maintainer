@@ -11,7 +11,7 @@ Design goals:
 - Normalize them into typed internal objects.
 - Choose models deterministically.
 - Validate before acting.
-- Keep future write actions idempotent and test-backed.
+- Keep write actions idempotent and test-backed.
 
 ## Project Status
 
@@ -42,15 +42,20 @@ Design goals:
 - Minimal skill dispatcher (`core/skill_dispatcher.py`) consuming the shared queue, wired into FastAPI lifespan.
 - **No GitHub write operations** — Phase 3 is strictly read + reason.
 
-### Next Up
+**Phase 4 — Orchestrator + First Write Actions (Idempotent)** ✅
+- Action protocol (`core/actions.py`): `ActionRequest` protocol with `action_type` property and `fingerprint()` method. Three concrete frozen dataclasses: `IssueCommentAction`, `AddLabelsAction`, `PRReviewSummaryAction`.
+- Idempotency layer (`core/idempotency.py`): `IdempotencyStore` protocol, `InMemoryIdempotencyStore`, `build_idempotency_key()` combining delivery ID + action fingerprint.
+- Action policy (`core/action_policy.py`): `ActionPolicy` with `DRY_RUN` mode (default `true` via env var), repo allowlist (`GITHUB_ALLOWED_REPOSITORIES`), event allowlist (`GITHUB_ALLOWED_EVENTS`).
+- Write methods on GitHub client: `create_issue_comment()`, `add_labels()`, `create_pr_review_summary()`. New return type: `PullRequestReview`.
+- Three write-capable skills: `PRSummarySkill` (`skills/pr_summary.py`), `IssueLabelSkill` (`skills/issue_label.py`), `IssueResponseSkill` (`skills/issue_response.py`). Each returns `SkillResult` with `planned_actions`.
+- Three new decision types: `PRSummaryDecision`, `IssueLabelDecision`, `IssueResponseDecision`.
+- Three new prompt templates: `prompts/pr_summary.md`, `prompts/issue_label.md`, `prompts/issue_response.md`.
+- Typed payload extraction helpers (`skills/payload.py`).
+- Full orchestrator (`core/orchestrator.py`) replacing the Phase 3 skill dispatcher in runtime use. Adds allowlist gating → skill matching → installation check → skill execution → action execution with idempotency and dry-run.
+- Server wiring updated: `server/app.py` uses `Orchestrator` with write skills; `__main__.py` starts uvicorn.
+- Integration tests (`tests/integration/`) covering happy path, duplicate replay, dry-run, and allowlist rejection.
 
-**Phase 4 — Orchestrator + First Write Actions (Idempotent)**
-- Full orchestrator (`core/orchestrator.py`) replacing the minimal dispatcher.
-- Idempotency layer (`core/idempotency.py`): key = delivery ID + action fingerprint.
-- Action policy (`core/action_policy.py`) with DRY_RUN mode as mandatory feature flag.
-- Write methods on GitHub client: `create_issue_comment()`, `add_labels()`, `create_pr_review_summary()`.
-- Write-capable skills: `skills/pr_summary.py`, `skills/issue_label.py`, `skills/issue_response.py`.
-- Repo + event type allowlist.
+### Next Up
 
 **Phase 5 — Controlled Auto-Fix Pipeline (Branch/Commit/PR)**
 - Patch worker, git operations, safety rules (path/diff/size).
@@ -95,7 +100,7 @@ make run-local
 
 ## Architecture
 
-### End-to-End Request Flow (Phase 3)
+### End-to-End Request Flow (Phase 4)
 
 ```
 GitHub webhook
@@ -103,11 +108,13 @@ GitHub webhook
   → HMAC signature verification (server/webhooks.py)
   → Event normalization (github/events.py → NormalizedEvent)
   → Async job queue (core/job_queue.py)
-  → Skill dispatcher (core/skill_dispatcher.py)
+  → Orchestrator (core/orchestrator.py)
+      → Allowlist check (repo + event type via ActionPolicy)
       → Match event to skills
       → Per-event: generate GitHub App JWT → fetch installation token → create GitHubClient
-      → Execute matching skills sequentially
-      → Log SkillResult as structured JSON
+      → Execute matching skills sequentially, collect planned_actions
+      → Execute actions with idempotency check + dry-run gate
+      → Log SkillResult and action outcomes as structured JSON
 ```
 
 ### LLM Routing Pipeline
@@ -120,33 +127,29 @@ Deterministic and policy-based — model choice is never delegated to an LLM.
 4. **LLM Router** (`core/llm_router.py`): `complete()` (direct), `complete_task()` (routed), `complete_with_escalation()` (tiered with validation callback).
 5. **Hook Bus** (`core/hooks.py`): Async `on_llm_prompt` and `on_llm_response` hooks.
 
-### Skill Pipeline (Phase 3)
+### Skill Pipeline
 
 Skills are the "brain" that decides what to do with a routed event:
 
 - **Skill framework** (`skills/base.py`): `SkillContext` (event + client + router + logger), generic `SkillResult[T]`, `BaseSkill` ABC with `handles_event()` and `execute()`.
-- **Decision types** (`skills/decisions.py`): `PRTriageDecision` and `IssueTriageDecision` — frozen dataclasses with `from_llm_response(content: str) -> Self` for strict JSON parsing. `make_decision_validator()` factory produces a `ResponseValidator` compatible with `complete_with_escalation()`.
-- **PR triage routing** (Option B in `skills/pr_triage.py`):
-  - Small PR (<50 changed lines, ≤3 files) → `TaskType.TRIAGE` / `TaskComplexity.LOW`
-  - Medium PR (<300 changed lines, ≤10 files) → `TaskType.DEEP_REVIEW` / `TaskComplexity.MEDIUM`
-  - Large PR → `TaskType.DEEP_REVIEW` / `TaskComplexity.HIGH`
-- **Issue triage** (`skills/issue_triage.py`): Always `TaskType.TRIAGE` / `TaskComplexity.LOW`.
-- **Prompt templates** (`prompts/pr_triage.md`, `prompts/issue_triage.md`): Loaded via `importlib.resources`, instruct the model to output raw JSON only.
+- **Decision types** (`skills/decisions.py`): `PRTriageDecision`, `IssueTriageDecision`, `PRSummaryDecision`, `IssueLabelDecision`, `IssueResponseDecision` — frozen dataclasses with `from_llm_response(content: str) -> Self` for strict JSON parsing. `make_decision_validator()` factory produces a `ResponseValidator` compatible with `complete_with_escalation()`.
+- **Read-only skills** (Phase 3): `PRTriageSkill` (Option B routing), `IssueTriageSkill`.
+- **Write skills** (Phase 4): `PRSummarySkill`, `IssueLabelSkill`, `IssueResponseSkill`. Each returns `SkillResult` with `planned_actions` list of `ActionRequest` objects.
+- **Payload helpers** (`skills/payload.py`): Typed extraction of owner, repo, PR number, issue number, sender from webhook payloads.
+- **Prompt templates** (`prompts/`): `pr_triage.md`, `issue_triage.md`, `pr_summary.md`, `issue_label.md`, `issue_response.md`. Loaded via `importlib.resources`, instruct the model to output raw JSON only.
 
-### GitHub Client Layer (Phase 3)
+### Action Execution Pipeline (Phase 4)
+
+- **Action protocol** (`core/actions.py`): `ActionRequest` protocol with `action_type` property and `fingerprint()` method. Three concrete types: `IssueCommentAction`, `AddLabelsAction`, `PRReviewSummaryAction`.
+- **Idempotency** (`core/idempotency.py`): `IdempotencyStore` protocol, `InMemoryIdempotencyStore`, `build_idempotency_key(delivery_id, action)`. Key = `"{delivery_id}:{action.fingerprint()}"`.
+- **Action policy** (`core/action_policy.py`): `DRY_RUN` mode (default `true`), repo allowlist, event allowlist. All configurable via env vars or constructor kwargs.
+- **Orchestrator** (`core/orchestrator.py`): Full event-to-action pipeline replacing the Phase 3 dispatcher. Allowlist gating → skill execution → action execution with idempotency + dry-run.
+
+### GitHub Client Layer
 
 - **Error hierarchy** (`github/errors.py`): `GitHubClientError` → `GitHubAuthenticationError` (401), `GitHubRateLimitError` (403 + rate limit), `GitHubResourceNotFoundError` (404), `GitHubValidationError` (422), `GitHubTransientError` (502/503/504). Separate from `LLMRouterError`.
 - **Diff parser** (`github/diff_parser.py`): `DiffLine`, `DiffHunk`, `FileDiff`, `parse_diff()`. Handles binary, rename, new/deleted files, no-newline-at-EOF, empty/truncated diffs.
-- **REST client** (`github/client.py`): Async context manager wrapping `httpx.AsyncClient`. Read-only methods return frozen dataclasses (`PullRequest`, `PullRequestFile`, `Issue`, `IssueComment`). Pagination on `get_issue_comments()` and `get_pull_request_files()` (Link header, max 10 pages / 300 items).
-
-### Skill Dispatcher (Phase 3)
-
-`core/skill_dispatcher.py` — minimal event-to-skill dispatcher (not the Phase 4 orchestrator):
-- Lifespan-managed async task started in `server/app.py`
-- Consumes the same `InMemoryJobQueue` that the webhook handler produces to
-- Per-event: fresh installation token → `GitHubClient` as async context manager → sequential skill execution
-- Logs each `SkillResult` as structured JSON with event_type, delivery_id, repository, skill_name, model, task_type, complexity, confidence, elapsed_seconds, decision, recommended_actions
-- No idempotency, no action policy, no writes, no retry framework, no plugin discovery
+- **REST client** (`github/client.py`): Async context manager wrapping `httpx.AsyncClient`. Read methods return frozen dataclasses (`PullRequest`, `PullRequestFile`, `Issue`, `IssueComment`). Write methods: `create_issue_comment()`, `add_labels()`, `create_pr_review_summary()` (returns `PullRequestReview`). Pagination on `get_issue_comments()` and `get_pull_request_files()` (Link header, max 10 pages / 300 items).
 
 ### Webhook Payload Key Paths
 
@@ -179,6 +182,14 @@ complete_task(self, system, messages, max_tokens, temperature,
 # github/auth.py — keyword-only args
 generate_github_app_jwt(*, app_id, private_key_pem) -> str
 fetch_installation_access_token(*, app_jwt, installation_id, base_url=..., timeout_seconds=..., client=None) -> InstallationAccessToken
+
+# github/client.py — write methods (Phase 4)
+create_issue_comment(self, owner, repo, issue_number, body) -> IssueComment
+add_labels(self, owner, repo, issue_number, labels: tuple[str, ...]) -> tuple[str, ...]
+create_pr_review_summary(self, owner, repo, pr_number, body, *, event="COMMENT", commit_id=None) -> PullRequestReview
+
+# core/idempotency.py
+build_idempotency_key(delivery_id: str, action: ActionRequest) -> str
 ```
 
 ## Key Conventions
@@ -202,10 +213,11 @@ fetch_installation_access_token(*, app_jwt, installation_id, base_url=..., timeo
 - Validation errors must be explicit and typed.
 - Startup should fail fast if defaults and catalog disagree.
 - No future phase should silently bypass signature verification.
-- Idempotency is required before any GitHub write actions (Phase 4).
-- DRY_RUN mode must exist before enabling writes (Phase 4).
+- Idempotency is enforced before all GitHub write actions (delivery ID + action fingerprint).
+- DRY_RUN mode is on by default — must be explicitly set to `false` to enable writes.
+- Allowlist gating runs before skill execution to save LLM/API cost.
+- Action execution failures do not stop remaining actions in the same event.
 - No secrets in logs.
-- Phase 3 is strictly read-only — no GitHub writes anywhere.
 
 ## Adding New Providers
 
@@ -217,8 +229,9 @@ See `CONTRIBUTING.md`. Key steps: implement `BaseLLMProvider`, register factory 
 2. Create prompt template in `prompts/` (raw JSON output, no markdown fences).
 3. Implement skill in `skills/` subclassing `BaseSkill`.
 4. Use `make_decision_validator(DecisionClass)` for escalation-on-parse-failure.
-5. Register in the dispatcher's skill list in `server/app.py`.
-6. Add tests with `FakeProvider` variant + respx mocking + golden output fixtures.
+5. For write skills: return `SkillResult` with `planned_actions` list of `ActionRequest` objects.
+6. Register in the orchestrator's skill list in `server/app.py`.
+7. Add tests with `FakeProvider` variant + respx mocking + golden output fixtures.
 
 ## CI
 
@@ -232,3 +245,4 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on PRs and pushes to main: star
 - `89c358f` — Rewrote the README with clearer project narrative and implementation context.
 - Phase 2 (uncommitted) — Added webhook ingress, GitHub App auth, event normalization, async queue.
 - Phase 3 (uncommitted) — Added GitHub client, diff parser, skill framework, read-only triage skills, dispatcher.
+- Phase 4 (uncommitted) — Added orchestrator, write actions, idempotency, action policy, write skills, integration tests.

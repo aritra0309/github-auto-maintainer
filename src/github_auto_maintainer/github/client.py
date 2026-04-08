@@ -1,4 +1,4 @@
-"""Async read-only GitHub REST API client."""
+"""Async GitHub REST API client with read and write operations."""
 
 from __future__ import annotations
 
@@ -80,8 +80,17 @@ class IssueComment:
     created_at: str
 
 
+@dataclass(frozen=True, slots=True)
+class PullRequestReview:
+    """A pull request review."""
+
+    id: int
+    state: str
+    body: str
+
+
 class GitHubClient:
-    """Async, read-only GitHub REST client."""
+    """Async GitHub REST client with read and write operations."""
 
     def __init__(
         self,
@@ -108,7 +117,7 @@ class GitHubClient:
             await self._client.aclose()
             self._client = None
 
-    # ── Public API ────────────────────────────────────────────────────
+    # ── Read API ──────────────────────────────────────────────
 
     async def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequest:
         url = f"{self._base_url}/repos/{owner}/{repo}/pulls/{number}"
@@ -138,7 +147,59 @@ class GitHubClient:
         items = await self._get_paginated(url)
         return tuple(_parse_issue_comment(item) for item in items)
 
-    # ── Internal helpers ──────────────────────────────────────────────
+    # ── Write API ─────────────────────────────────────────────
+
+    async def create_issue_comment(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> IssueComment:
+        """Create a comment on an issue or pull request."""
+        url = f"{self._base_url}/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        data = await self._post_json(url, {"body": body})
+        return _parse_issue_comment(data)
+
+    async def add_labels(
+        self, owner: str, repo: str, issue_number: int, labels: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Add labels to an issue. Returns all current labels on the issue."""
+        url = f"{self._base_url}/repos/{owner}/{repo}/issues/{issue_number}/labels"
+        client = self._ensure_client()
+        response = await client.post(
+            url, json={"labels": list(labels)}, headers=self._json_headers()
+        )
+        _raise_for_status(response)
+        raw: Any = response.json()
+        if not isinstance(raw, list):
+            msg = f"Expected JSON array from {url}"
+            raise GitHubClientError(msg, status_code=response.status_code)
+        label_names: list[str] = []
+        for item in raw:
+            if isinstance(item, dict):
+                label_names.append(str(item.get("name", "")))
+        return tuple(label_names)
+
+    async def create_pr_review_summary(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        body: str,
+        *,
+        event: str = "COMMENT",
+        commit_id: str | None = None,
+    ) -> PullRequestReview:
+        """Create a pull request review (summary only, no line comments)."""
+        url = f"{self._base_url}/repos/{owner}/{repo}/pulls/{pr_number}/reviews"
+        payload: dict[str, Any] = {"body": body, "event": event}
+        if commit_id is not None:
+            payload["commit_id"] = commit_id
+        data = await self._post_json(url, payload)
+        return PullRequestReview(
+            id=int(data.get("id", 0)),
+            state=str(data.get("state", "")),
+            body=str(data.get("body") or ""),
+        )
+
+    # ── Internal helpers ──────────────────────────────────────
 
     def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -163,6 +224,16 @@ class GitHubClient:
     async def _get_json(self, url: str) -> dict[str, Any]:
         client = self._ensure_client()
         response = await client.get(url, headers=self._json_headers())
+        _raise_for_status(response)
+        data: Any = response.json()
+        if not isinstance(data, dict):
+            msg = f"Expected JSON object from {url}"
+            raise GitHubClientError(msg, status_code=response.status_code)
+        return data
+
+    async def _post_json(self, url: str, body: dict[str, Any]) -> dict[str, Any]:
+        client = self._ensure_client()
+        response = await client.post(url, json=body, headers=self._json_headers())
         _raise_for_status(response)
         data: Any = response.json()
         if not isinstance(data, dict):
@@ -232,7 +303,7 @@ def _parse_next_link(link_header: str) -> str | None:
     return match.group(1) if match else None
 
 
-# ── Response parsers ──────────────────────────────────────────────────
+# ── Response parsers ──────────────────────────────────────────────────────────
 
 
 def _parse_pull_request(data: dict[str, Any]) -> PullRequest:

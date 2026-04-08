@@ -8,6 +8,7 @@ from github_auto_maintainer.github.client import (
     GitHubClient,
     IssueComment,
     PullRequest,
+    PullRequestReview,
 )
 from github_auto_maintainer.github.errors import (
     GitHubAuthenticationError,
@@ -46,6 +47,15 @@ def _issue_json() -> dict[str, object]:
         "labels": [{"name": "bug"}],
         "created_at": "2026-01-01T00:00:00Z",
         "updated_at": "2026-01-01T00:00:00Z",
+    }
+
+
+def _comment_json(comment_id: int = 1) -> dict[str, object]:
+    return {
+        "id": comment_id,
+        "user": {"login": "bot"},
+        "body": "Hello from bot",
+        "created_at": "2026-01-01T00:00:00Z",
     }
 
 
@@ -225,3 +235,80 @@ async def test_client_outside_context_manager_raises() -> None:
     client = GitHubClient(token="token")
     with pytest.raises(RuntimeError, match="async context manager"):
         await client.get_pull_request("o", "r", 1)
+
+
+# ── Write API tests ──────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_issue_comment() -> None:
+    route = respx.post(f"{BASE}/repos/owner/repo/issues/42/comments").mock(
+        return_value=httpx.Response(201, json=_comment_json(99))
+    )
+    async with GitHubClient(token="test-token") as client:
+        comment = await client.create_issue_comment("owner", "repo", 42, "Hello from bot")
+
+    assert route.called
+    assert isinstance(comment, IssueComment)
+    assert comment.id == 99
+    assert comment.author == "bot"
+    assert comment.body == "Hello from bot"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_add_labels() -> None:
+    label_array = [
+        {"id": 1, "name": "bug", "color": "d73a4a"},
+        {"id": 2, "name": "triage", "color": "0075ca"},
+    ]
+    route = respx.post(f"{BASE}/repos/owner/repo/issues/10/labels").mock(
+        return_value=httpx.Response(200, json=label_array)
+    )
+    async with GitHubClient(token="test-token") as client:
+        labels = await client.add_labels("owner", "repo", 10, ("bug", "triage"))
+
+    assert route.called
+    assert labels == ("bug", "triage")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_pr_review_summary() -> None:
+    review_json = {"id": 555, "state": "COMMENTED", "body": "Looks good overall."}
+    route = respx.post(f"{BASE}/repos/owner/repo/pulls/7/reviews").mock(
+        return_value=httpx.Response(200, json=review_json)
+    )
+    async with GitHubClient(token="test-token") as client:
+        review = await client.create_pr_review_summary(
+            "owner", "repo", 7, "Looks good overall."
+        )
+
+    assert route.called
+    assert isinstance(review, PullRequestReview)
+    assert review.id == 555
+    assert review.state == "COMMENTED"
+    assert review.body == "Looks good overall."
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_issue_comment_404() -> None:
+    respx.post(f"{BASE}/repos/owner/repo/issues/999/comments").mock(
+        return_value=httpx.Response(404, text="Not Found")
+    )
+    async with GitHubClient(token="test-token") as client:
+        with pytest.raises(GitHubResourceNotFoundError):
+            await client.create_issue_comment("owner", "repo", 999, "hello")
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_create_issue_comment_422() -> None:
+    respx.post(f"{BASE}/repos/owner/repo/issues/1/comments").mock(
+        return_value=httpx.Response(422, text="Validation Failed")
+    )
+    async with GitHubClient(token="test-token") as client:
+        with pytest.raises(GitHubValidationError):
+            await client.create_issue_comment("owner", "repo", 1, "hello")

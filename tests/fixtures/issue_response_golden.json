@@ -1,0 +1,5 @@
+{
+  "response_body": "Thank you for reporting this issue. A 500 error on the login page suggests a server-side problem. Could you share the browser console output and any recent changes to your account? We will investigate the server logs.",
+  "needs_more_info": true,
+  "category": "bug_report"
+}

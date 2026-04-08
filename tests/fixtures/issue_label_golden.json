@@ -1,0 +1,4 @@
+{
+  "labels": ["bug", "high-priority", "login"],
+  "reasoning": "This is a server error (500) on a critical user flow (login), warranting bug and high-priority labels."
+}

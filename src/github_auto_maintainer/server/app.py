@@ -7,14 +7,18 @@ import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request, status
 
+from github_auto_maintainer.core.action_policy import ActionPolicy
+from github_auto_maintainer.core.idempotency import InMemoryIdempotencyStore
 from github_auto_maintainer.core.job_queue import InMemoryJobQueue, JobQueue
 from github_auto_maintainer.core.llm_router import LLMRouter
-from github_auto_maintainer.core.skill_dispatcher import SkillDispatcher
+from github_auto_maintainer.core.orchestrator import Orchestrator
+from github_auto_maintainer.github.auth import load_private_key_pem
 from github_auto_maintainer.github.events import NormalizedEvent, normalize_github_event
 from github_auto_maintainer.server.webhooks import (
     InvalidSignatureError,
@@ -23,14 +27,16 @@ from github_auto_maintainer.server.webhooks import (
     parse_github_webhook_headers,
     verify_webhook_signature,
 )
-from github_auto_maintainer.skills.issue_triage import IssueTriageSkill
-from github_auto_maintainer.skills.pr_triage import PRTriageSkill
+from github_auto_maintainer.skills.issue_label import IssueLabelSkill
+from github_auto_maintainer.skills.issue_response import IssueResponseSkill
+from github_auto_maintainer.skills.pr_summary import PRSummarySkill
 
 
 def create_app(
     *,
     queue: JobQueue[NormalizedEvent] | None = None,
     webhook_secret: str | None = None,
+    router: LLMRouter | None = None,
 ) -> FastAPI:
     """Create the webhook ingress app with injectable dependencies."""
 
@@ -39,21 +45,48 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app_id = os.getenv("GITHUB_APP_ID", "")
-        private_key_pem = os.getenv("GITHUB_APP_PRIVATE_KEY", "")
         logger: structlog.stdlib.BoundLogger = structlog.get_logger()
 
         dispatcher_task: asyncio.Task[None] | None = None
-        if app_id and private_key_pem:
-            dispatcher = SkillDispatcher(
-                queue=job_queue,
-                skills=[PRTriageSkill(), IssueTriageSkill()],
-                router=LLMRouter(),
-                app_id=app_id,
-                private_key_pem=private_key_pem,
-                logger=logger,
+
+        app_id = os.getenv("GITHUB_APP_ID", "")
+        key_path = os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", "")
+
+        if app_id and key_path:
+            # Agreed Phase 3.5 contract:
+            #   - empty/unset path  → warn + skip  (handled by the outer if)
+            #   - path set, file missing → warn + skip
+            #   - path set, file exists but unreadable → fail loud (OSError propagates)
+            key_file = Path(key_path)
+            if not key_file.exists():
+                logger.warning(
+                    "app.dispatcher_skipped",
+                    reason="GITHUB_APP_PRIVATE_KEY_PATH file does not exist",
+                    path=key_path,
+                )
+            else:
+                # File exists — any read error (permissions, encoding) is a hard failure.
+                private_key_pem = load_private_key_pem(key_path)
+
+                llm_router = router or LLMRouter()
+                policy = ActionPolicy()
+                idempotency_store = InMemoryIdempotencyStore()
+                orchestrator = Orchestrator(
+                    queue=job_queue,
+                    skills=[PRSummarySkill(), IssueLabelSkill(), IssueResponseSkill()],
+                    router=llm_router,
+                    app_id=app_id,
+                    private_key_pem=private_key_pem,
+                    policy=policy,
+                    idempotency_store=idempotency_store,
+                    logger=logger,
+                )
+                dispatcher_task = asyncio.create_task(orchestrator.run())
+        else:
+            logger.warning(
+                "app.dispatcher_skipped",
+                reason="GITHUB_APP_ID or GITHUB_APP_PRIVATE_KEY_PATH not set",
             )
-            dispatcher_task = asyncio.create_task(dispatcher.run())
 
         yield
 

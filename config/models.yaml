@@ -1,5 +1,5 @@
 models:
-  # ── Anthropic ────────────────────────────────────────────────────────────────
+  # ── Anthropic ────────────────────────────────────────────────────────
   - provider: anthropic
     model: claude-haiku-4-5-20251001        # lightweight; haiku 3.x retired Feb 2026
     context_window: 200000
@@ -14,6 +14,7 @@ models:
     context_window: 1000000
     cost_tier: medium
     suited_for:
+      - triage
       - patch_generation
       - deep_review
       - architecture
@@ -28,7 +29,7 @@ models:
       - long_horizon_tasks
       - enterprise_agents
 
-  # ── OpenAI ───────────────────────────────────────────────────────────────────
+  # ── OpenAI ─────────────────────────────────────────────────────────────
   - provider: openai
     model: gpt-5.4-mini                     # replaces gpt-4.1-mini; low-latency tier
     context_window: 1000000
@@ -49,7 +50,7 @@ models:
       - refactoring
       - agentic_workflows
 
-  # ── xAI / Grok ───────────────────────────────────────────────────────────────
+  # ── xAI / Grok ─────────────────────────────────────────────────────────
   - provider: grok
     model: grok-4-1-fast-non-reasoning      # budget tier; 2M ctx, no thinking overhead
     context_window: 2000000
@@ -95,7 +96,7 @@ models:
       - orchestration
       - multi_step_tasks
 
-  # ── Ollama (local / offline) ──────────────────────────────────────────────────
+  # ── Ollama (local / offline) ────────────────────────────────────────────
   - provider: ollama
     model: llama4:scout                     # MoE, multimodal, huge ctx; replaces llama3.1:8b
     context_window: 10000000

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 
+import uvicorn
+
 from github_auto_maintainer.core.errors import LLMRouterError
 from github_auto_maintainer.core.llm_router import LLMRouter, RouterConfig
 
@@ -26,6 +28,13 @@ def main() -> None:
     print(
         "github-auto-maintainer bootstrap: "
         f"provider={config.default_provider} model={config.default_model} status=validated"
+    )
+
+    uvicorn.run(
+        "github_auto_maintainer.server.app:app",
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
     )
 
 

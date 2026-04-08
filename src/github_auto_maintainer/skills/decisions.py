@@ -88,8 +88,87 @@ class IssueTriageDecision:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class PRSummaryDecision:
+    """Parsed PR summary review decision from LLM output."""
+
+    summary: str
+    key_changes: tuple[str, ...]
+    suggestions: tuple[str, ...]
+    risk_level: Literal["high", "medium", "low"]
+
+    @classmethod
+    def from_llm_response(cls, content: str) -> Self:
+        data = _parse_json_object(content)
+        _validate_required_fields(
+            data,
+            required=("summary", "key_changes", "suggestions", "risk_level"),
+        )
+        summary = _validate_string(data, "summary")
+        key_changes = _validate_string_list(data, "key_changes")
+        suggestions = _validate_string_list(data, "suggestions")
+        risk_level = _validate_enum(data, "risk_level", _RISK_LEVELS)
+
+        return cls(
+            summary=summary,
+            key_changes=key_changes,
+            suggestions=suggestions,
+            risk_level=risk_level,  # type: ignore[arg-type]
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class IssueLabelDecision:
+    """Parsed issue labeling decision from LLM output."""
+
+    labels: tuple[str, ...]
+    reasoning: str
+
+    @classmethod
+    def from_llm_response(cls, content: str) -> Self:
+        data = _parse_json_object(content)
+        _validate_required_fields(
+            data,
+            required=("labels", "reasoning"),
+        )
+        labels = _validate_string_list(data, "labels")
+        reasoning = _validate_string(data, "reasoning")
+
+        return cls(
+            labels=labels,
+            reasoning=reasoning,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class IssueResponseDecision:
+    """Parsed issue response decision from LLM output."""
+
+    response_body: str
+    needs_more_info: bool
+    category: Literal["bug_report", "feature_request", "question", "documentation", "enhancement"]
+
+    @classmethod
+    def from_llm_response(cls, content: str) -> Self:
+        data = _parse_json_object(content)
+        _validate_required_fields(
+            data,
+            required=("response_body", "needs_more_info", "category"),
+        )
+        response_body = _validate_string(data, "response_body")
+        needs_more_info = _validate_bool(data, "needs_more_info")
+        category = _validate_enum(data, "category", _ISSUE_CATEGORIES)
+
+        return cls(
+            response_body=response_body,
+            needs_more_info=needs_more_info,
+            category=category,  # type: ignore[arg-type]
+        )
+
+
 def make_decision_validator(
-    decision_cls: type[PRTriageDecision] | type[IssueTriageDecision],
+    decision_cls: type[PRTriageDecision] | type[IssueTriageDecision]
+    | type[PRSummaryDecision] | type[IssueLabelDecision] | type[IssueResponseDecision],
 ) -> Callable[[LLMResponse], bool]:
     """Build a ResponseValidator that returns True on successful parse, False otherwise."""
 

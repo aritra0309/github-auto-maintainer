@@ -8,6 +8,7 @@ from typing import Any, Generic, TypeVar
 
 import structlog
 
+from github_auto_maintainer.core.actions import ActionRequest
 from github_auto_maintainer.core.llm_router import LLMRouter
 from github_auto_maintainer.core.task_types import TaskComplexity, TaskType
 from github_auto_maintainer.github.client import GitHubClient
@@ -40,6 +41,7 @@ class SkillResult(Generic[T]):
     task_type_used: TaskType
     complexity_used: TaskComplexity
     elapsed_seconds: float
+    planned_actions: tuple[ActionRequest, ...] = ()
 
 
 class BaseSkill(ABC):
