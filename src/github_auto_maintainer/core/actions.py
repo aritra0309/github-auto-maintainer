@@ -1,4 +1,4 @@
-"""Action request types for Phase 4 write operations."""
+"""Action request types for write operations."""
 
 from __future__ import annotations
 
@@ -76,3 +76,71 @@ class PRReviewSummaryAction:
     def fingerprint(self) -> str:
         body_hash = hashlib.sha256(self.body.encode("utf-8")).hexdigest()[:12]
         return f"pr_review_summary:{self.owner}/{self.repo}#{self.pr_number}:{body_hash}"
+
+
+# ── Phase 5 action types ─────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class PatchFileSummary:
+    """Lightweight patch file summary for action fingerprinting."""
+
+    path: str
+    is_new: bool
+
+
+@dataclass(frozen=True, slots=True)
+class CreateBranchAction:
+    """Request to create a branch."""
+
+    owner: str
+    repo: str
+    branch_name: str
+    from_sha: str
+
+    @property
+    def action_type(self) -> str:
+        return "create_branch"
+
+    def fingerprint(self) -> str:
+        return f"create_branch:{self.owner}/{self.repo}:{self.branch_name}"
+
+
+@dataclass(frozen=True, slots=True)
+class CommitPatchAction:
+    """Request to commit patches to a branch."""
+
+    owner: str
+    repo: str
+    branch_name: str
+    patches: tuple[PatchFileSummary, ...]
+    commit_message: str
+
+    @property
+    def action_type(self) -> str:
+        return "commit_patch"
+
+    def fingerprint(self) -> str:
+        paths = ",".join(sorted(p.path for p in self.patches))
+        return f"commit_patch:{self.owner}/{self.repo}:{self.branch_name}:{paths}"
+
+
+@dataclass(frozen=True, slots=True)
+class CreatePullRequestAction:
+    """Request to create a pull request."""
+
+    owner: str
+    repo: str
+    title: str
+    body: str
+    head_branch: str
+    base_branch: str
+    issue_number: int
+
+    @property
+    def action_type(self) -> str:
+        return "create_pull_request"
+
+    def fingerprint(self) -> str:
+        body_hash = hashlib.sha256(self.body.encode("utf-8")).hexdigest()[:12]
+        return f"create_pr:{self.owner}/{self.repo}:{self.head_branch}:{body_hash}"

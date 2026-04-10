@@ -17,6 +17,9 @@ from github_auto_maintainer.core.action_policy import ActionPolicy
 from github_auto_maintainer.core.actions import (
     ActionRequest,
     AddLabelsAction,
+    CommitPatchAction,
+    CreateBranchAction,
+    CreatePullRequestAction,
     IssueCommentAction,
     PRReviewSummaryAction,
 )
@@ -206,6 +209,25 @@ class Orchestrator:
                         action.body,
                         event=action.event,
                         commit_id=action.commit_id,
+                    )
+                case CreateBranchAction():
+                    await client.create_branch(
+                        action.owner, action.repo, action.branch_name, action.from_sha
+                    )
+                case CommitPatchAction():
+                    # Recording-only action — the actual git operations are performed
+                    # by the skill directly via git_ops functions during execute().
+                    # The orchestrator records this action for idempotency and audit
+                    # purposes but does not make any API calls.
+                    pass
+                case CreatePullRequestAction():
+                    await client.create_pull_request(
+                        action.owner,
+                        action.repo,
+                        action.title,
+                        action.body,
+                        action.head_branch,
+                        action.base_branch,
                     )
                 case _:
                     self._logger.warning(

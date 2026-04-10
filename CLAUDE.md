@@ -55,12 +55,19 @@ Design goals:
 - Server wiring updated: `server/app.py` uses `Orchestrator` with write skills; `__main__.py` starts uvicorn.
 - Integration tests (`tests/integration/`) covering happy path, duplicate replay, dry-run, and allowlist rejection.
 
-### Next Up
+**Phase 5 — Controlled Auto-Fix Pipeline (Branch/Commit/PR)** ✅
+- Automation package (`automation/`): safety guardrails (`safety.py`), GitHub REST-based git operations (`git_ops.py`), `AutoFixSkill` patch worker (`patch_worker.py`), async check runner for future use (`check_runner.py`).
+- New error hierarchy (`core/errors.py`): `AutomationError` base (inherits from `Exception` directly — NOT from `LLMRouterError`, `SkillError`, or `GitHubClientError`) → `SafetyError`, `PatchConflictError`, `CheckFailureError`.
+- Three new action types (`core/actions.py`): `CreateBranchAction`, `CommitPatchAction`, `CreatePullRequestAction` with `PatchFileSummary` value object. Deterministic fingerprints with SHA-256 content hashing.
+- Five new GitHub client methods (`github/client.py`): `get_file_content()`, `create_or_update_file()`, `create_branch()`, `get_branch_ref()`, `create_pull_request()`. Four new return types: `FileContent`, `FileCommitResult`, `BranchRef`, `CreatedPullRequest`.
+- SQLite-backed run metadata persistence (`core/run_store.py`): `RunStatus` enum, `AutoFixRun` frozen dataclass, `RunStore` protocol, `InMemoryRunStore`, `SQLiteRunStore` (aiosqlite).
+- `AutoFixSkill` (`automation/patch_worker.py`): Triggered by `issues.labeled` (auto-fix label) or `issue_comment.created` (/auto-fix command). Pipeline: fetch issue → LLM patch generation → safety validation → branch/commit/PR via REST API → follow-up issue comment.
+- `PatchGenerationDecision` and `PatchFileSpec` decision types (`skills/decisions.py`) with `from_llm_response()` parsing. Prompt template: `prompts/auto_fix.md`.
+- Safety module (`automation/safety.py`): blocked paths/extensions, diff size limits, allowed command templates (ruff, mypy, pytest), path traversal rejection.
+- Server wiring: `AutoFixSkill` conditionally enabled via `AUTO_FIX_ENABLED` env var, with `SQLiteRunStore` persistence.
+- Integration tests (`tests/integration/test_auto_fix_pipeline.py`) covering happy path, LLM rejection, safety rejection, dry-run, allowlist rejection, and run store persistence.
 
-**Phase 5 — Controlled Auto-Fix Pipeline (Branch/Commit/PR)**
-- Patch worker, git operations, safety rules (path/diff/size).
-- Allowed command templates only (ruff, mypy, pytest). No arbitrary execution from model output.
-- Run metadata persistence (SQLite for v1).
+### Next Up
 
 **Phase 6 — Deployment + Observability + Portfolio Polish**
 - Dockerfile, docker-compose, deployment docs.
@@ -100,7 +107,7 @@ make run-local
 
 ## Architecture
 
-### End-to-End Request Flow (Phase 4)
+### End-to-End Request Flow
 
 ```
 GitHub webhook
@@ -115,6 +122,16 @@ GitHub webhook
       → Execute matching skills sequentially, collect planned_actions
       → Execute actions with idempotency check + dry-run gate
       → Log SkillResult and action outcomes as structured JSON
+
+Auto-fix path (Phase 5):
+  issues.labeled "auto-fix" OR issue_comment.created "/auto-fix"
+      → AutoFixSkill
+          → Fetch issue details
+          → LLM patch generation (PatchGenerationDecision)
+          → Safety validation (blocked paths, diff size, extensions)
+          → Git operations via REST API (create branch → commit files → open PR)
+          → Follow-up IssueCommentAction with PR link
+          → Run metadata persisted to SQLite
 ```
 
 ### LLM Routing Pipeline
@@ -132,15 +149,16 @@ Deterministic and policy-based — model choice is never delegated to an LLM.
 Skills are the "brain" that decides what to do with a routed event:
 
 - **Skill framework** (`skills/base.py`): `SkillContext` (event + client + router + logger), generic `SkillResult[T]`, `BaseSkill` ABC with `handles_event()` and `execute()`.
-- **Decision types** (`skills/decisions.py`): `PRTriageDecision`, `IssueTriageDecision`, `PRSummaryDecision`, `IssueLabelDecision`, `IssueResponseDecision` — frozen dataclasses with `from_llm_response(content: str) -> Self` for strict JSON parsing. `make_decision_validator()` factory produces a `ResponseValidator` compatible with `complete_with_escalation()`.
+- **Decision types** (`skills/decisions.py`): `PRTriageDecision`, `IssueTriageDecision`, `PRSummaryDecision`, `IssueLabelDecision`, `IssueResponseDecision`, `PatchGenerationDecision` (with `PatchFileSpec`) — frozen dataclasses with `from_llm_response(content: str) -> Self` for strict JSON parsing. `make_decision_validator()` factory produces a `ResponseValidator` compatible with `complete_with_escalation()`.
 - **Read-only skills** (Phase 3): `PRTriageSkill` (Option B routing), `IssueTriageSkill`.
 - **Write skills** (Phase 4): `PRSummarySkill`, `IssueLabelSkill`, `IssueResponseSkill`. Each returns `SkillResult` with `planned_actions` list of `ActionRequest` objects.
+- **Auto-fix skill** (Phase 5): `AutoFixSkill` (`automation/patch_worker.py`). Triggered by issue label or comment command. Performs git operations directly during `execute()`, returns `IssueCommentAction` follow-up.
 - **Payload helpers** (`skills/payload.py`): Typed extraction of owner, repo, PR number, issue number, sender from webhook payloads.
-- **Prompt templates** (`prompts/`): `pr_triage.md`, `issue_triage.md`, `pr_summary.md`, `issue_label.md`, `issue_response.md`. Loaded via `importlib.resources`, instruct the model to output raw JSON only.
+- **Prompt templates** (`prompts/`): `pr_triage.md`, `issue_triage.md`, `pr_summary.md`, `issue_label.md`, `issue_response.md`, `auto_fix.md`. Loaded via `importlib.resources`, instruct the model to output raw JSON only.
 
 ### Action Execution Pipeline (Phase 4)
 
-- **Action protocol** (`core/actions.py`): `ActionRequest` protocol with `action_type` property and `fingerprint()` method. Three concrete types: `IssueCommentAction`, `AddLabelsAction`, `PRReviewSummaryAction`. `IssueCommentAction` and `PRReviewSummaryAction` include SHA-256 body content hashes in their fingerprints.
+- **Action protocol** (`core/actions.py`): `ActionRequest` protocol with `action_type` property and `fingerprint()` method. Six concrete types: `IssueCommentAction`, `AddLabelsAction`, `PRReviewSummaryAction` (Phase 4), `CreateBranchAction`, `CommitPatchAction`, `CreatePullRequestAction` (Phase 5). Content-aware fingerprints use SHA-256 body hashes where applicable.
 - **Idempotency** (`core/idempotency.py`): `IdempotencyStore` protocol, `InMemoryIdempotencyStore`, `build_idempotency_key(delivery_id, action)`. Key = `"{delivery_id}:{action.fingerprint()}"`.
 - **Action policy** (`core/action_policy.py`): `DRY_RUN` mode (default `true`), repo allowlist, event allowlist. All configurable via env vars or constructor kwargs.
 - **Orchestrator** (`core/orchestrator.py`): Full event-to-action pipeline replacing the Phase 3 dispatcher. Allowlist gating → skill execution → action execution with idempotency + dry-run.
@@ -149,13 +167,13 @@ Skills are the "brain" that decides what to do with a routed event:
 
 - **Error hierarchy** (`github/errors.py`): `GitHubClientError` → `GitHubAuthenticationError` (401), `GitHubRateLimitError` (403 + rate limit), `GitHubResourceNotFoundError` (404), `GitHubConflictError` (409, non-retryable), `GitHubValidationError` (422), `GitHubTransientError` (502/503/504). Separate from `LLMRouterError`.
 - **Diff parser** (`github/diff_parser.py`): `DiffLine`, `DiffHunk`, `FileDiff`, `parse_diff()`. Handles binary, rename, new/deleted files, no-newline-at-EOF, empty/truncated diffs.
-- **REST client** (`github/client.py`): Async context manager wrapping `httpx.AsyncClient`. Read methods return frozen dataclasses (`PullRequest`, `PullRequestFile`, `Issue`, `IssueComment`). Write methods: `create_issue_comment()`, `add_labels()`, `create_pr_review_summary()` (returns `PullRequestReview`). Pagination on `get_issue_comments()` and `get_pull_request_files()` (Link header, max 10 pages / 300 items).
+- **REST client** (`github/client.py`): Async context manager wrapping `httpx.AsyncClient`. Read methods return frozen dataclasses (`PullRequest`, `PullRequestFile`, `Issue`, `IssueComment`, `FileContent`, `BranchRef`). Write methods: `create_issue_comment()`, `add_labels()`, `create_pr_review_summary()` (Phase 4), `create_or_update_file()`, `create_branch()`, `create_pull_request()` (Phase 5). New return types: `FileCommitResult`, `CreatedPullRequest`. Pagination on `get_issue_comments()` and `get_pull_request_files()` (Link header, max 10 pages / 300 items).
 
 
 ### Retry Strategy
 
 - **Retry helper** (`github/retry.py`): `github_retry` decorator using tenacity. Retries `GitHubTransientError` only (502/503/504). Config: 3 attempts, exponential backoff 0.5s→4s, `reraise=True`.
-- **GitHub client**: All 8 public methods on `GitHubClient` are decorated with `@github_retry`.
+- **GitHub client**: All 13 public methods on `GitHubClient` are decorated with `@github_retry`.
 - **Auth**: `fetch_installation_access_token()` raises `GitHubTransientError` on 502/503/504 (before the `InstallationTokenError` catch-all) and is decorated with `@github_retry`. `fetch_repository_installation()` is NOT retried.
 - **Non-retryable errors**: 401 (`GitHubAuthenticationError`), 403 (`GitHubRateLimitError`), 404 (`GitHubResourceNotFoundError`), 409 (`GitHubConflictError`), 422 (`GitHubValidationError`).
 - **Orchestrator**: No retry in the orchestrator — retry is handled at the HTTP layer only.
@@ -199,6 +217,19 @@ create_pr_review_summary(self, owner, repo, pr_number, body, *, event="COMMENT",
 
 # core/idempotency.py
 build_idempotency_key(delivery_id: str, action: ActionRequest) -> str
+
+# github/client.py — Phase 5 methods
+get_file_content(self, owner, repo, path, *, ref=None) -> FileContent
+create_or_update_file(self, owner, repo, path, message, content_b64, *, sha=None, branch=None) -> FileCommitResult
+create_branch(self, owner, repo, branch_name, sha) -> BranchRef
+get_branch_ref(self, owner, repo, branch) -> BranchRef
+create_pull_request(self, owner, repo, title, body, head, base) -> CreatedPullRequest
+
+# automation/git_ops.py — high-level operations
+generate_branch_name(prefix, issue_number) -> str
+create_fix_branch(client, owner, repo, branch_name, base_branch) -> BranchRef
+apply_patches(client, owner, repo, branch_name, patches, commit_message) -> tuple[FileCommitResult, ...]
+open_fix_pr(client, owner, repo, title, body, head, base) -> CreatedPullRequest
 ```
 
 ## Key Conventions
@@ -208,7 +239,7 @@ build_idempotency_key(delivery_id: str, action: ActionRequest) -> str
 - **ruff** for linting and formatting. Line length: 100.
 - **pytest-asyncio** with `asyncio_mode = "auto"` — async tests use `@pytest.mark.asyncio` by convention.
 - **Frozen dataclasses** (`frozen=True, slots=True`) for all value objects.
-- **Error hierarchy**: `LLMRouterError` tree for router/provider errors, separate `GitHubClientError` tree for GitHub API errors, `SkillError` tree for skill execution/parsing errors.
+- **Error hierarchy**: `LLMRouterError` tree for router/provider errors, `GitHubClientError` tree for GitHub API errors, `SkillError` tree for skill execution/parsing errors, `AutomationError` tree for auto-fix pipeline errors. All four trees inherit from `Exception` directly — they are intentionally separate.
 - **Tests use fake providers** (not mocks) — `FakeProvider` subclasses `BaseLLMProvider` and returns canned `LLMResponse` objects. For skill tests, variants return canned JSON matching the decision schema.
 - **respx** for httpx mocking in GitHub client and skill tests.
 - **`json.loads()` returns `Any`** — when declaring typed return values, assign to an explicitly typed intermediate variable to satisfy mypy strict (e.g., `data: dict[str, Any] = json.loads(...)`).
@@ -227,6 +258,9 @@ build_idempotency_key(delivery_id: str, action: ActionRequest) -> str
 - Allowlist gating runs before skill execution to save LLM/API cost.
 - Action execution failures do not stop remaining actions in the same event.
 - No secrets in logs.
+- Safety validation runs before any git write operation in the auto-fix pipeline.
+- No subprocess git, no `shell=True`, no GraphQL — all git operations use the GitHub REST API.
+- Auto-fix run metadata is persisted before and after every pipeline stage.
 
 ## Adding New Providers
 

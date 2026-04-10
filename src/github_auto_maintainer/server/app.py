@@ -27,6 +27,7 @@ from github_auto_maintainer.server.webhooks import (
     parse_github_webhook_headers,
     verify_webhook_signature,
 )
+from github_auto_maintainer.skills.base import BaseSkill
 from github_auto_maintainer.skills.issue_label import IssueLabelSkill
 from github_auto_maintainer.skills.issue_response import IssueResponseSkill
 from github_auto_maintainer.skills.pr_summary import PRSummarySkill
@@ -71,9 +72,43 @@ def create_app(
                 llm_router = router or LLMRouter()
                 policy = ActionPolicy()
                 idempotency_store = InMemoryIdempotencyStore()
+
+                skills: list[BaseSkill] = [
+                    PRSummarySkill(),
+                    IssueLabelSkill(),
+                    IssueResponseSkill(),
+                ]
+
+                # Phase 5: Auto-fix skill
+                auto_fix_enabled = (
+                    os.getenv("AUTO_FIX_ENABLED", "true").strip().lower() != "false"
+                )
+                if auto_fix_enabled:
+                    from github_auto_maintainer.automation.patch_worker import AutoFixSkill
+                    from github_auto_maintainer.core.run_store import SQLiteRunStore
+
+                    run_store_path = os.getenv("RUN_STORE_PATH", "runs.db")
+                    trigger_label = os.getenv(
+                        "AUTO_FIX_TRIGGER_LABEL", "auto-fix"
+                    )
+                    trigger_command = os.getenv(
+                        "AUTO_FIX_TRIGGER_COMMAND", "/auto-fix"
+                    )
+
+                    run_store = SQLiteRunStore(db_path=run_store_path)
+                    await run_store.initialize()
+
+                    skills.append(
+                        AutoFixSkill(
+                            run_store=run_store,
+                            trigger_label=trigger_label,
+                            trigger_command=trigger_command,
+                        )
+                    )
+
                 orchestrator = Orchestrator(
                     queue=job_queue,
-                    skills=[PRSummarySkill(), IssueLabelSkill(), IssueResponseSkill()],
+                    skills=skills,
                     router=llm_router,
                     app_id=app_id,
                     private_key_pem=private_key_pem,

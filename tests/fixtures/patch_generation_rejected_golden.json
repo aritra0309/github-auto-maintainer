@@ -1,0 +1,8 @@
+{
+  "can_fix": false,
+  "rejection_reason": "This issue requires architectural changes across multiple services and cannot be safely auto-fixed.",
+  "files_to_modify": [],
+  "commit_message": "",
+  "confidence": "low",
+  "explanation": "The issue describes a distributed caching problem that spans multiple microservices. This is not a small, safe code fix."
+}
