@@ -10,6 +10,9 @@ from typing import Any
 import httpx
 import jwt
 
+from github_auto_maintainer.github.errors import GitHubTransientError
+from github_auto_maintainer.github.retry import github_retry
+
 
 class GitHubAuthError(Exception):
     """Base error for GitHub App authentication failures."""
@@ -58,6 +61,7 @@ def generate_github_app_jwt(*, app_id: str | int, private_key_pem: str) -> str:
     raise GitHubAuthError("JWT encoder returned unexpected token type")
 
 
+@github_retry
 async def fetch_installation_access_token(
     *,
     app_jwt: str,
@@ -80,6 +84,14 @@ async def fetch_installation_access_token(
     else:
         async with httpx.AsyncClient(timeout=timeout_seconds) as async_client:
             response = await async_client.post(endpoint, headers=headers)
+
+    if response.status_code in (502, 503, 504):
+        raise GitHubTransientError(
+            f"GitHub installation token request failed (transient): "
+            f"status={response.status_code} body={response.text}",
+            status_code=response.status_code,
+            response_body=response.text,
+        )
 
     if response.status_code >= 400:
         raise InstallationTokenError(
@@ -140,7 +152,9 @@ def _response_json(response: httpx.Response) -> dict[str, Any]:
     try:
         data = response.json()
     except ValueError as exc:
-        raise InstallationTokenError("GitHub installation token response was not valid JSON") from exc
+        raise InstallationTokenError(
+            "GitHub installation token response was not valid JSON"
+        ) from exc
     if not isinstance(data, dict):
         raise InstallationTokenError("GitHub installation token response JSON must be an object")
     return data

@@ -17,6 +17,8 @@ from github_auto_maintainer.core.llm_types import LLMMessage, LLMResponse
 from github_auto_maintainer.providers.base import BaseLLMProvider
 
 
+
+
 class OllamaProvider(BaseLLMProvider):
     """Ollama provider implementation using httpx."""
 

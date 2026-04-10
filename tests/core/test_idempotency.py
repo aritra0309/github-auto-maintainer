@@ -38,7 +38,7 @@ def test_build_key_issue_comment() -> None:
         owner="owner", repo="repo", issue_number=42, body="hello"
     )
     key = build_idempotency_key("delivery-1", action)
-    assert key == "delivery-1::issue_comment:owner/repo#42"
+    assert key == "delivery-1::issue_comment:owner/repo#42:2cf24dba5fb0"
 
 
 def test_build_key_add_labels_sorted() -> None:

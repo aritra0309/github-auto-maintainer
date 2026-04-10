@@ -1,4 +1,4 @@
-"""Router, provider, and skill error types."""
+"""Router, provider, skill, and automation error types."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ class RouterStartupValidationError(LLMRouterError):
     """Raised when router startup validation detects invalid configuration."""
 
 
-# ── Skill errors ──────────────────────────────────────────────────────
+# ── Skill errors ──────────────────────────────────────────────
 
 
 class SkillError(Exception):
@@ -60,3 +60,22 @@ class SkillExecutionError(SkillError):
 
 class SkillResponseParsingError(SkillError):
     """Raised when LLM response cannot be parsed into a typed decision."""
+
+
+# ── Automation errors ─────────────────────────────────────────
+
+
+class AutomationError(Exception):
+    """Base error for automation pipeline failures."""
+
+
+class SafetyError(AutomationError):
+    """Raised when a safety rule is violated."""
+
+
+class PatchConflictError(AutomationError):
+    """Raised when a generated patch cannot be applied cleanly."""
+
+
+class CheckFailureError(AutomationError):
+    """Raised when a post-patch validation check fails."""

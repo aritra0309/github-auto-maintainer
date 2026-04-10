@@ -30,3 +30,4 @@ venv/
 
 # Local temp workspace clones created by reproducer flows
 workspace/
+runs.db

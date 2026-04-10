@@ -28,5 +28,9 @@ class GitHubRateLimitError(GitHubClientError):
     """Raised when rate limit is exhausted (403 with X-RateLimit-Remaining: 0)."""
 
 
+class GitHubConflictError(GitHubClientError):
+    """Raised on 409 conflict responses."""
+
+
 class GitHubTransientError(GitHubClientError):
     """Raised on transient server errors (502, 503, 504)."""

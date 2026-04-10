@@ -12,11 +12,13 @@ import httpx
 from github_auto_maintainer.github.errors import (
     GitHubAuthenticationError,
     GitHubClientError,
+    GitHubConflictError,
     GitHubRateLimitError,
     GitHubResourceNotFoundError,
     GitHubTransientError,
     GitHubValidationError,
 )
+from github_auto_maintainer.github.retry import github_retry
 
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
 
@@ -89,6 +91,48 @@ class PullRequestReview:
     body: str
 
 
+# ── Phase 5 dataclasses ──────────────────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class FileContent:
+    """Contents of a single file retrieved from the repository."""
+
+    path: str
+    sha: str
+    content_b64: str
+    encoding: str
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class FileCommitResult:
+    """Result of creating or updating a file via the contents API."""
+
+    path: str
+    sha: str
+    commit_sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class BranchRef:
+    """A git reference pointing to a branch."""
+
+    ref: str
+    sha: str
+
+
+@dataclass(frozen=True, slots=True)
+class CreatedPullRequest:
+    """Result of creating a pull request."""
+
+    number: int
+    html_url: str
+    head_ref: str
+    base_ref: str
+    title: str
+
+
 class GitHubClient:
     """Async GitHub REST client with read and write operations."""
 
@@ -119,15 +163,18 @@ class GitHubClient:
 
     # ── Read API ──────────────────────────────────────────────
 
+    @github_retry
     async def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequest:
         url = f"{self._base_url}/repos/{owner}/{repo}/pulls/{number}"
         data = await self._get_json(url)
         return _parse_pull_request(data)
 
+    @github_retry
     async def get_pull_request_diff(self, owner: str, repo: str, number: int) -> str:
         url = f"{self._base_url}/repos/{owner}/{repo}/pulls/{number}"
         return await self._get_text(url, accept=_DIFF_ACCEPT)
 
+    @github_retry
     async def get_pull_request_files(
         self, owner: str, repo: str, number: int
     ) -> tuple[PullRequestFile, ...]:
@@ -135,11 +182,13 @@ class GitHubClient:
         items = await self._get_paginated(url)
         return tuple(_parse_pull_request_file(item) for item in items)
 
+    @github_retry
     async def get_issue(self, owner: str, repo: str, number: int) -> Issue:
         url = f"{self._base_url}/repos/{owner}/{repo}/issues/{number}"
         data = await self._get_json(url)
         return _parse_issue(data)
 
+    @github_retry
     async def get_issue_comments(
         self, owner: str, repo: str, number: int
     ) -> tuple[IssueComment, ...]:
@@ -149,6 +198,7 @@ class GitHubClient:
 
     # ── Write API ─────────────────────────────────────────────
 
+    @github_retry
     async def create_issue_comment(
         self, owner: str, repo: str, issue_number: int, body: str
     ) -> IssueComment:
@@ -157,6 +207,7 @@ class GitHubClient:
         data = await self._post_json(url, {"body": body})
         return _parse_issue_comment(data)
 
+    @github_retry
     async def add_labels(
         self, owner: str, repo: str, issue_number: int, labels: tuple[str, ...]
     ) -> tuple[str, ...]:
@@ -177,6 +228,7 @@ class GitHubClient:
                 label_names.append(str(item.get("name", "")))
         return tuple(label_names)
 
+    @github_retry
     async def create_pr_review_summary(
         self,
         owner: str,
@@ -197,6 +249,122 @@ class GitHubClient:
             id=int(data.get("id", 0)),
             state=str(data.get("state", "")),
             body=str(data.get("body") or ""),
+        )
+
+    # ── Phase 5 API ───────────────────────────────────────────
+
+    @github_retry
+    async def get_file_content(
+        self, owner: str, repo: str, path: str, *, ref: str | None = None
+    ) -> FileContent:
+        """Get the contents of a file from the repository."""
+        url = f"{self._base_url}/repos/{owner}/{repo}/contents/{path}"
+        params: dict[str, str] = {}
+        if ref is not None:
+            params["ref"] = ref
+        client = self._ensure_client()
+        response = await client.get(url, headers=self._json_headers(), params=params)
+        _raise_for_status(response)
+        data: Any = response.json()
+        if not isinstance(data, dict):
+            msg = f"Expected JSON object from {url}"
+            raise GitHubClientError(msg, status_code=response.status_code)
+        return FileContent(
+            path=str(data.get("path", "")),
+            sha=str(data.get("sha", "")),
+            content_b64=str(data.get("content", "")),
+            encoding=str(data.get("encoding", "")),
+            size=int(data.get("size", 0)),
+        )
+
+    @github_retry
+    async def create_or_update_file(
+        self,
+        owner: str,
+        repo: str,
+        path: str,
+        message: str,
+        content_b64: str,
+        *,
+        sha: str | None = None,
+        branch: str | None = None,
+    ) -> FileCommitResult:
+        """Create or update a file via the contents API."""
+        url = f"{self._base_url}/repos/{owner}/{repo}/contents/{path}"
+        payload: dict[str, Any] = {
+            "message": message,
+            "content": content_b64,
+        }
+        if sha is not None:
+            payload["sha"] = sha
+        if branch is not None:
+            payload["branch"] = branch
+        data = await self._put_json(url, payload)
+        content_data: dict[str, Any] = data.get("content") or {}
+        commit_data: dict[str, Any] = data.get("commit") or {}
+        return FileCommitResult(
+            path=str(content_data.get("path", path)),
+            sha=str(content_data.get("sha", "")),
+            commit_sha=str(commit_data.get("sha", "")),
+        )
+
+    @github_retry
+    async def create_branch(
+        self, owner: str, repo: str, branch_name: str, from_sha: str
+    ) -> BranchRef:
+        """Create a new branch from a given SHA."""
+        url = f"{self._base_url}/repos/{owner}/{repo}/git/refs"
+        payload: dict[str, str] = {
+            "ref": f"refs/heads/{branch_name}",
+            "sha": from_sha,
+        }
+        data = await self._post_json(url, payload)
+        obj: dict[str, Any] = data.get("object") or {}
+        return BranchRef(
+            ref=str(data.get("ref", "")),
+            sha=str(obj.get("sha", from_sha)),
+        )
+
+    @github_retry
+    async def get_branch_ref(
+        self, owner: str, repo: str, branch: str
+    ) -> BranchRef:
+        """Get the ref for a branch."""
+        url = f"{self._base_url}/repos/{owner}/{repo}/git/ref/heads/{branch}"
+        data = await self._get_json(url)
+        obj: dict[str, Any] = data.get("object") or {}
+        return BranchRef(
+            ref=str(data.get("ref", "")),
+            sha=str(obj.get("sha", "")),
+        )
+
+    @github_retry
+    async def create_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        title: str,
+        body: str,
+        head: str,
+        base: str,
+    ) -> CreatedPullRequest:
+        """Create a pull request."""
+        url = f"{self._base_url}/repos/{owner}/{repo}/pulls"
+        payload: dict[str, str] = {
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+        }
+        data = await self._post_json(url, payload)
+        head_data: dict[str, Any] = data.get("head") or {}
+        base_data: dict[str, Any] = data.get("base") or {}
+        return CreatedPullRequest(
+            number=int(data.get("number", 0)),
+            html_url=str(data.get("html_url", "")),
+            head_ref=str(head_data.get("ref", head)),
+            base_ref=str(base_data.get("ref", base)),
+            title=str(data.get("title", title)),
         )
 
     # ── Internal helpers ──────────────────────────────────────
@@ -234,6 +402,16 @@ class GitHubClient:
     async def _post_json(self, url: str, body: dict[str, Any]) -> dict[str, Any]:
         client = self._ensure_client()
         response = await client.post(url, json=body, headers=self._json_headers())
+        _raise_for_status(response)
+        data: Any = response.json()
+        if not isinstance(data, dict):
+            msg = f"Expected JSON object from {url}"
+            raise GitHubClientError(msg, status_code=response.status_code)
+        return data
+
+    async def _put_json(self, url: str, body: dict[str, Any]) -> dict[str, Any]:
+        client = self._ensure_client()
+        response = await client.put(url, json=body, headers=self._json_headers())
         _raise_for_status(response)
         data: Any = response.json()
         if not isinstance(data, dict):
@@ -290,6 +468,8 @@ def _raise_for_status(response: httpx.Response) -> None:
         raise GitHubClientError(msg, status_code=code, response_body=body)
     if code == 404:
         raise GitHubResourceNotFoundError(msg, status_code=code, response_body=body)
+    if code == 409:
+        raise GitHubConflictError(msg, status_code=code, response_body=body)
     if code == 422:
         raise GitHubValidationError(msg, status_code=code, response_body=body)
     if code in (502, 503, 504):
@@ -303,7 +483,7 @@ def _parse_next_link(link_header: str) -> str | None:
     return match.group(1) if match else None
 
 
-# ── Response parsers ──────────────────────────────────────────────────────────
+# ── Response parsers ──────────────────────────────────────────────────
 
 
 def _parse_pull_request(data: dict[str, Any]) -> PullRequest:

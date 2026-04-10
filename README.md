@@ -50,13 +50,29 @@ Full orchestrator replacing the Phase 3 dispatcher. Three write-capable skills:
 | **IssueResponseSkill** | `issues.opened` | Posts an initial triage response comment |
 
 Safety layer:
-- **Action protocol** — typed `ActionRequest` with deterministic fingerprinting
-- **Idempotency** — delivery ID + action fingerprint prevents duplicate writes
+- **Action protocol** — typed `ActionRequest` with deterministic fingerprinting (content-hash aware)
+- **Idempotency** — delivery ID + action fingerprint (including body content hash) prevents duplicate writes
 - **Dry-run mode** — enabled by default; writes are blocked until explicitly turned off
 - **Allowlist gating** — repo and event type allowlists checked before skill execution (saves LLM/API cost)
 - **Fault isolation** — one skill or action failure does not stop others in the same event
 
-**211 tests** pass across unit, skill, orchestrator, and integration test suites.
+### Phase 5 — Controlled Auto-Fix Pipeline (Branch/Commit/PR) ✅
+
+LLM-driven auto-fix pipeline triggered by issue labels or commands:
+
+| Trigger | Flow | Result |
+|---|---|---|
+| `issues.labeled` "auto-fix" | Issue → LLM → safety check → branch/commit/PR | Fix PR opened, comment posted |
+| `issue_comment.created` "/auto-fix" | Same pipeline | Same result |
+
+Safety layer:
+- **Path/extension blocking** — `.github/workflows`, `.env`, `*.pem`, secret directories blocked by default
+- **Diff size limits** — max lines changed, max files changed, per-file line limits
+- **Allowed commands only** — ruff, mypy, pytest templates (no arbitrary execution from model output)
+- **Path traversal rejection** — `..` in any file path is rejected
+- **Run metadata persistence** — every pipeline run tracked in SQLite with full audit trail
+
+**370 tests** pass across unit, skill, orchestrator, automation, and integration test suites.
 
 ## End-to-end request flow
 
@@ -72,13 +88,18 @@ GitHub webhook
       → Execute skills, collect planned actions
       → Execute actions (idempotency check → dry-run gate → write)
       → Structured JSON logging of every outcome
+
+Auto-fix path (issues.labeled "auto-fix" or issue_comment "/auto-fix"):
+      → AutoFixSkill
+          → Fetch issue → LLM patch generation → safety validation
+          → Create branch → commit files → open PR (via REST API)
+          → Post issue comment with PR link
+          → Persist run metadata to SQLite
 ```
 
 ## What is next
 
-**Phase 5 — Controlled Auto-Fix Pipeline**: Patch worker, git operations (branch/commit/PR), safety rules (path/diff/size guards), allowed command templates only (ruff, mypy, pytest — no arbitrary execution), run metadata persistence (SQLite).
-
-**Phase 6 — Deployment + Observability**: Dockerfile, docker-compose, metrics/logging, container smoke tests, staging repo soak tests.
+**Phase 6 — Deployment + Observability**: Dockerfile, docker-compose, metrics/logging (event_id, delivery_id, selected_model, escalation_count, latency), container smoke tests, staging repo soak tests.
 
 ## Run locally
 
@@ -110,11 +131,15 @@ make run-local
 | `DEFAULT_PROVIDER` | `openai` | LLM provider for routing |
 | `DEFAULT_MODEL` | `gpt-5.4-mini` | Default model name |
 | `GITHUB_APP_ID` | — | GitHub App ID |
-| `GITHUB_PRIVATE_KEY` | — | GitHub App private key (PEM) |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | — | Path to GitHub App private key PEM file |
 | `GITHUB_WEBHOOK_SECRET` | — | Webhook HMAC secret |
 | `DRY_RUN` | `true` | Block all GitHub writes when `true` |
 | `GITHUB_ALLOWED_REPOSITORIES` | _(empty = allow all)_ | Comma-separated repo allowlist |
 | `GITHUB_ALLOWED_EVENTS` | _(empty = allow all)_ | Comma-separated event allowlist |
+| `AUTO_FIX_ENABLED` | `true` | Enable/disable the auto-fix pipeline |
+| `RUN_STORE_PATH` | `runs.db` | SQLite database path for auto-fix run metadata |
+| `AUTO_FIX_TRIGGER_LABEL` | `auto-fix` | Issue label that triggers auto-fix |
+| `AUTO_FIX_TRIGGER_COMMAND` | `/auto-fix` | Issue comment command that triggers auto-fix |
 
 ## Repository layout
 
@@ -124,20 +149,27 @@ src/github_auto_maintainer/
 │   ├── orchestrator.py    # Event-to-action pipeline
 │   ├── llm_router.py      # Deterministic model routing
 │   ├── routing_policy.py   # Multi-key model ranking
-│   ├── actions.py          # Action protocol + concrete types
+│   ├── actions.py          # Action protocol + 6 concrete types
 │   ├── action_policy.py    # Dry-run, allowlists
 │   ├── idempotency.py      # Deduplication layer
+│   ├── run_store.py        # Auto-fix run metadata (SQLite)
 │   ├── job_queue.py        # Async queue abstraction
 │   ├── model_catalog.py    # YAML model descriptors
 │   ├── task_types.py       # TaskType + TaskComplexity enums
 │   ├── hooks.py            # LLM observability hooks
 │   └── settings.py         # Typed runtime settings
 ├── github/                # GitHub integration
-│   ├── client.py           # Async REST client (read + write)
+│   ├── client.py           # Async REST client (read + write + git)
 │   ├── auth.py             # App JWT + installation tokens
 │   ├── events.py           # Event normalization
 │   ├── diff_parser.py      # Unified diff parser
-│   └── errors.py           # GitHub error hierarchy
+│   ├── errors.py           # GitHub error hierarchy
+│   └── retry.py            # Transient failure retry helper
+├── automation/            # Auto-fix pipeline (Phase 5)
+│   ├── patch_worker.py     # AutoFixSkill (issue → LLM → PR)
+│   ├── safety.py           # Path/diff/command safety guardrails
+│   ├── git_ops.py          # REST-based branch/commit/PR operations
+│   └── check_runner.py     # Async command runner (future use)
 ├── server/                # FastAPI application
 │   ├── app.py              # Ingress + lifespan wiring
 │   └── webhooks.py         # HMAC signature verification
@@ -157,7 +189,7 @@ src/github_auto_maintainer/
 └── tools/                 # Helper integrations
 
 config/models.yaml          # Model catalog
-tests/                      # 211 tests (unit, skill, orchestrator, integration)
+tests/                      # 370 tests (unit, skill, orchestrator, automation, integration)
 ```
 
 ## Engineering and safety contract
@@ -175,3 +207,6 @@ tests/                      # 211 tests (unit, skill, orchestrator, integration)
 - Allowlist gating before skill execution
 - Action fault isolation (one failure does not stop others)
 - No secrets in logs
+- Safety validation before any auto-fix git write (blocked paths, extensions, diff size, path traversal)
+- No subprocess git, no `shell=True` — all git operations use GitHub REST API
+- Auto-fix run metadata persisted at every pipeline stage
