@@ -12,11 +12,13 @@ import httpx
 from github_auto_maintainer.github.errors import (
     GitHubAuthenticationError,
     GitHubClientError,
+    GitHubConflictError,
     GitHubRateLimitError,
     GitHubResourceNotFoundError,
     GitHubTransientError,
     GitHubValidationError,
 )
+from github_auto_maintainer.github.retry import github_retry
 
 _LINK_NEXT_RE = re.compile(r'<([^>]+)>;\s*rel="next"')
 
@@ -119,15 +121,18 @@ class GitHubClient:
 
     # ── Read API ──────────────────────────────────────────────
 
+    @github_retry
     async def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequest:
         url = f"{self._base_url}/repos/{owner}/{repo}/pulls/{number}"
         data = await self._get_json(url)
         return _parse_pull_request(data)
 
+    @github_retry
     async def get_pull_request_diff(self, owner: str, repo: str, number: int) -> str:
         url = f"{self._base_url}/repos/{owner}/{repo}/pulls/{number}"
         return await self._get_text(url, accept=_DIFF_ACCEPT)
 
+    @github_retry
     async def get_pull_request_files(
         self, owner: str, repo: str, number: int
     ) -> tuple[PullRequestFile, ...]:
@@ -135,11 +140,13 @@ class GitHubClient:
         items = await self._get_paginated(url)
         return tuple(_parse_pull_request_file(item) for item in items)
 
+    @github_retry
     async def get_issue(self, owner: str, repo: str, number: int) -> Issue:
         url = f"{self._base_url}/repos/{owner}/{repo}/issues/{number}"
         data = await self._get_json(url)
         return _parse_issue(data)
 
+    @github_retry
     async def get_issue_comments(
         self, owner: str, repo: str, number: int
     ) -> tuple[IssueComment, ...]:
@@ -149,6 +156,7 @@ class GitHubClient:
 
     # ── Write API ─────────────────────────────────────────────
 
+    @github_retry
     async def create_issue_comment(
         self, owner: str, repo: str, issue_number: int, body: str
     ) -> IssueComment:
@@ -157,6 +165,7 @@ class GitHubClient:
         data = await self._post_json(url, {"body": body})
         return _parse_issue_comment(data)
 
+    @github_retry
     async def add_labels(
         self, owner: str, repo: str, issue_number: int, labels: tuple[str, ...]
     ) -> tuple[str, ...]:
@@ -177,6 +186,7 @@ class GitHubClient:
                 label_names.append(str(item.get("name", "")))
         return tuple(label_names)
 
+    @github_retry
     async def create_pr_review_summary(
         self,
         owner: str,
@@ -290,6 +300,8 @@ def _raise_for_status(response: httpx.Response) -> None:
         raise GitHubClientError(msg, status_code=code, response_body=body)
     if code == 404:
         raise GitHubResourceNotFoundError(msg, status_code=code, response_body=body)
+    if code == 409:
+        raise GitHubConflictError(msg, status_code=code, response_body=body)
     if code == 422:
         raise GitHubValidationError(msg, status_code=code, response_body=body)
     if code in (502, 503, 504):

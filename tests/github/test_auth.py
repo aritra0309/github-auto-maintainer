@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import jwt
 import pytest
+from tenacity import wait_none
 
 from github_auto_maintainer.github.auth import (
     InstallationTokenError,
@@ -95,3 +97,55 @@ async def test_fetch_repository_installation_returns_installation_id() -> None:
         )
 
     assert installation.installation_id == 777
+
+
+@pytest.mark.asyncio
+async def test_fetch_installation_access_token_retries_transient_failure() -> None:
+    """502 on first call, then 201 on second call — function succeeds after retry."""
+    call_count = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        _ = request
+        if call_count == 1:
+            return httpx.Response(status_code=502, text="Bad Gateway")
+        return httpx.Response(
+            status_code=201,
+            json={"token": "retry-token", "expires_at": "2026-04-06T14:00:00Z"},
+        )
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://api.github.com") as client:
+        with patch.object(
+            fetch_installation_access_token.retry,  # type: ignore[attr-defined]
+            "wait",
+            wait_none(),
+        ):
+            token = await fetch_installation_access_token(
+                app_jwt="app-jwt",
+                installation_id=42,
+                client=client,
+            )
+
+    assert token.token == "retry-token"
+    assert call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fetch_installation_access_token_non_transient_raises_installation_token_error() -> (
+    None
+):
+    """401 response raises InstallationTokenError, not GitHubTransientError."""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        _ = request
+        return httpx.Response(status_code=401, text="bad credentials")
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(transport=transport, base_url="https://api.github.com") as client:
+        with pytest.raises(InstallationTokenError):
+            await fetch_installation_access_token(
+                app_jwt="bad-jwt",
+                installation_id=42,
+                client=client,
+            )

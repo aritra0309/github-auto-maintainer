@@ -43,7 +43,7 @@ Design goals:
 - **No GitHub write operations** — Phase 3 is strictly read + reason.
 
 **Phase 4 — Orchestrator + First Write Actions (Idempotent)** ✅
-- Action protocol (`core/actions.py`): `ActionRequest` protocol with `action_type` property and `fingerprint()` method. Three concrete frozen dataclasses: `IssueCommentAction`, `AddLabelsAction`, `PRReviewSummaryAction`.
+- Action protocol (`core/actions.py`): `ActionRequest` protocol with `action_type` property and `fingerprint()` method. Three concrete frozen dataclasses: `IssueCommentAction`, `AddLabelsAction`, `PRReviewSummaryAction`. `IssueCommentAction` and `PRReviewSummaryAction` fingerprints include a SHA-256 body content hash for deduplication accuracy.
 - Idempotency layer (`core/idempotency.py`): `IdempotencyStore` protocol, `InMemoryIdempotencyStore`, `build_idempotency_key()` combining delivery ID + action fingerprint.
 - Action policy (`core/action_policy.py`): `ActionPolicy` with `DRY_RUN` mode (default `true` via env var), repo allowlist (`GITHUB_ALLOWED_REPOSITORIES`), event allowlist (`GITHUB_ALLOWED_EVENTS`).
 - Write methods on GitHub client: `create_issue_comment()`, `add_labels()`, `create_pr_review_summary()`. New return type: `PullRequestReview`.
@@ -140,16 +140,25 @@ Skills are the "brain" that decides what to do with a routed event:
 
 ### Action Execution Pipeline (Phase 4)
 
-- **Action protocol** (`core/actions.py`): `ActionRequest` protocol with `action_type` property and `fingerprint()` method. Three concrete types: `IssueCommentAction`, `AddLabelsAction`, `PRReviewSummaryAction`.
+- **Action protocol** (`core/actions.py`): `ActionRequest` protocol with `action_type` property and `fingerprint()` method. Three concrete types: `IssueCommentAction`, `AddLabelsAction`, `PRReviewSummaryAction`. `IssueCommentAction` and `PRReviewSummaryAction` include SHA-256 body content hashes in their fingerprints.
 - **Idempotency** (`core/idempotency.py`): `IdempotencyStore` protocol, `InMemoryIdempotencyStore`, `build_idempotency_key(delivery_id, action)`. Key = `"{delivery_id}:{action.fingerprint()}"`.
 - **Action policy** (`core/action_policy.py`): `DRY_RUN` mode (default `true`), repo allowlist, event allowlist. All configurable via env vars or constructor kwargs.
 - **Orchestrator** (`core/orchestrator.py`): Full event-to-action pipeline replacing the Phase 3 dispatcher. Allowlist gating → skill execution → action execution with idempotency + dry-run.
 
 ### GitHub Client Layer
 
-- **Error hierarchy** (`github/errors.py`): `GitHubClientError` → `GitHubAuthenticationError` (401), `GitHubRateLimitError` (403 + rate limit), `GitHubResourceNotFoundError` (404), `GitHubValidationError` (422), `GitHubTransientError` (502/503/504). Separate from `LLMRouterError`.
+- **Error hierarchy** (`github/errors.py`): `GitHubClientError` → `GitHubAuthenticationError` (401), `GitHubRateLimitError` (403 + rate limit), `GitHubResourceNotFoundError` (404), `GitHubConflictError` (409, non-retryable), `GitHubValidationError` (422), `GitHubTransientError` (502/503/504). Separate from `LLMRouterError`.
 - **Diff parser** (`github/diff_parser.py`): `DiffLine`, `DiffHunk`, `FileDiff`, `parse_diff()`. Handles binary, rename, new/deleted files, no-newline-at-EOF, empty/truncated diffs.
 - **REST client** (`github/client.py`): Async context manager wrapping `httpx.AsyncClient`. Read methods return frozen dataclasses (`PullRequest`, `PullRequestFile`, `Issue`, `IssueComment`). Write methods: `create_issue_comment()`, `add_labels()`, `create_pr_review_summary()` (returns `PullRequestReview`). Pagination on `get_issue_comments()` and `get_pull_request_files()` (Link header, max 10 pages / 300 items).
+
+
+### Retry Strategy
+
+- **Retry helper** (`github/retry.py`): `github_retry` decorator using tenacity. Retries `GitHubTransientError` only (502/503/504). Config: 3 attempts, exponential backoff 0.5s→4s, `reraise=True`.
+- **GitHub client**: All 8 public methods on `GitHubClient` are decorated with `@github_retry`.
+- **Auth**: `fetch_installation_access_token()` raises `GitHubTransientError` on 502/503/504 (before the `InstallationTokenError` catch-all) and is decorated with `@github_retry`. `fetch_repository_installation()` is NOT retried.
+- **Non-retryable errors**: 401 (`GitHubAuthenticationError`), 403 (`GitHubRateLimitError`), 404 (`GitHubResourceNotFoundError`), 409 (`GitHubConflictError`), 422 (`GitHubValidationError`).
+- **Orchestrator**: No retry in the orchestrator — retry is handled at the HTTP layer only.
 
 ### Webhook Payload Key Paths
 

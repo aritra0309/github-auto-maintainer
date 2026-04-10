@@ -13,6 +13,7 @@ from github_auto_maintainer.github.client import (
 from github_auto_maintainer.github.errors import (
     GitHubAuthenticationError,
     GitHubClientError,
+    GitHubConflictError,
     GitHubRateLimitError,
     GitHubResourceNotFoundError,
     GitHubTransientError,
@@ -193,6 +194,17 @@ async def test_error_404_raises_not_found() -> None:
     async with GitHubClient(token="token") as client:
         with pytest.raises(GitHubResourceNotFoundError):
             await client.get_pull_request("owner", "repo", 999)
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_error_409_raises_conflict_error() -> None:
+    respx.get(f"{BASE}/repos/owner/repo/pulls/1").mock(
+        return_value=httpx.Response(409, text="Conflict")
+    )
+    async with GitHubClient(token="token") as client:
+        with pytest.raises(GitHubConflictError):
+            await client.get_pull_request("owner", "repo", 1)
 
 
 @pytest.mark.asyncio

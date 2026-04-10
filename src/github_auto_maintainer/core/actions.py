@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -35,7 +36,8 @@ class IssueCommentAction:
         return "issue_comment"
 
     def fingerprint(self) -> str:
-        return f"issue_comment:{self.owner}/{self.repo}#{self.issue_number}"
+        body_hash = hashlib.sha256(self.body.encode("utf-8")).hexdigest()[:12]
+        return f"issue_comment:{self.owner}/{self.repo}#{self.issue_number}:{body_hash}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,4 +74,5 @@ class PRReviewSummaryAction:
         return "pr_review_summary"
 
     def fingerprint(self) -> str:
-        return f"pr_review_summary:{self.owner}/{self.repo}#{self.pr_number}"
+        body_hash = hashlib.sha256(self.body.encode("utf-8")).hexdigest()[:12]
+        return f"pr_review_summary:{self.owner}/{self.repo}#{self.pr_number}:{body_hash}"

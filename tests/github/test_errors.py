@@ -3,6 +3,7 @@ from __future__ import annotations
 from github_auto_maintainer.github.errors import (
     GitHubAuthenticationError,
     GitHubClientError,
+    GitHubConflictError,
     GitHubRateLimitError,
     GitHubResourceNotFoundError,
     GitHubTransientError,
@@ -55,3 +56,14 @@ def test_github_errors_are_not_llm_router_errors() -> None:
 
     err = GitHubClientError("test")
     assert not isinstance(err, LLMRouterError)
+
+
+def test_conflict_error_is_client_error() -> None:
+    err = GitHubConflictError("conflict", status_code=409)
+    assert isinstance(err, GitHubClientError)
+    assert err.status_code == 409
+
+
+def test_conflict_error_is_not_transient() -> None:
+    err = GitHubConflictError("conflict", status_code=409)
+    assert not isinstance(err, GitHubTransientError)

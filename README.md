@@ -50,8 +50,8 @@ Full orchestrator replacing the Phase 3 dispatcher. Three write-capable skills:
 | **IssueResponseSkill** | `issues.opened` | Posts an initial triage response comment |
 
 Safety layer:
-- **Action protocol** — typed `ActionRequest` with deterministic fingerprinting
-- **Idempotency** — delivery ID + action fingerprint prevents duplicate writes
+- **Action protocol** — typed `ActionRequest` with deterministic fingerprinting (content-hash aware)
+- **Idempotency** — delivery ID + action fingerprint (including body content hash) prevents duplicate writes
 - **Dry-run mode** — enabled by default; writes are blocked until explicitly turned off
 - **Allowlist gating** — repo and event type allowlists checked before skill execution (saves LLM/API cost)
 - **Fault isolation** — one skill or action failure does not stop others in the same event
@@ -110,7 +110,7 @@ make run-local
 | `DEFAULT_PROVIDER` | `openai` | LLM provider for routing |
 | `DEFAULT_MODEL` | `gpt-5.4-mini` | Default model name |
 | `GITHUB_APP_ID` | — | GitHub App ID |
-| `GITHUB_PRIVATE_KEY` | — | GitHub App private key (PEM) |
+| `GITHUB_APP_PRIVATE_KEY_PATH` | — | Path to GitHub App private key PEM file |
 | `GITHUB_WEBHOOK_SECRET` | — | Webhook HMAC secret |
 | `DRY_RUN` | `true` | Block all GitHub writes when `true` |
 | `GITHUB_ALLOWED_REPOSITORIES` | _(empty = allow all)_ | Comma-separated repo allowlist |
@@ -137,7 +137,8 @@ src/github_auto_maintainer/
 │   ├── auth.py             # App JWT + installation tokens
 │   ├── events.py           # Event normalization
 │   ├── diff_parser.py      # Unified diff parser
-│   └── errors.py           # GitHub error hierarchy
+│   ├── errors.py           # GitHub error hierarchy
+│   └── retry.py            # Transient failure retry helper
 ├── server/                # FastAPI application
 │   ├── app.py              # Ingress + lifespan wiring
 │   └── webhooks.py         # HMAC signature verification
