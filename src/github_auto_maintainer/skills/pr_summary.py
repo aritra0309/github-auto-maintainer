@@ -176,4 +176,5 @@ class PRSummarySkill(BaseSkill):
                     body=review_body,
                 ),
             ),
+            escalation_count=response.escalation_count,
         )

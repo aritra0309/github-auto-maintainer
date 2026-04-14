@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
 
 import pytest
+from unittest.mock import patch
 from tenacity import wait_none
 
 from github_auto_maintainer.core.errors import (
     ModelCatalogLoadError,
     RouterStartupValidationError,
     TransientProviderError,
-    UnknownProviderError,
 )
 from github_auto_maintainer.core.model_catalog import ModelCatalog, ModelDescriptor
 from github_auto_maintainer.core.hooks import HookBus
 from github_auto_maintainer.core.llm_router import LLMRouter, RouterConfig, RouterRetryConfig
 from github_auto_maintainer.core.llm_types import LLMMessage, LLMResponse
-from github_auto_maintainer.core.task_types import TaskComplexity, TaskType
+from github_auto_maintainer.core.task_types import TaskType
 from github_auto_maintainer.providers.base import BaseLLMProvider
 
 
@@ -72,17 +71,23 @@ def _messages() -> list[LLMMessage]:
     return [{"role": "user", "content": "hello"}]
 
 
+def _fake_factory(provider: str, model: str, litellm_model: str) -> BaseLLMProvider:
+    _ = litellm_model
+    return FakeProvider(provider_name=provider, model=model)
+
+
 @pytest.mark.asyncio
 async def test_router_uses_defaults_when_override_not_passed() -> None:
     used: dict[str, str] = {}
 
-    def fake_factory(model: str) -> BaseLLMProvider:
+    def tracking_factory(provider: str, model: str, litellm_model: str) -> BaseLLMProvider:
+        _ = litellm_model
         used["model"] = model
-        return FakeProvider(provider_name="openai", model=model)
+        return FakeProvider(provider_name=provider, model=model)
 
     router = LLMRouter(
         config=RouterConfig(default_provider="openai", default_model="gpt-default"),
-        provider_factories={"openai": fake_factory},
+        provider_factory=tracking_factory,
     )
 
     response = await router.complete(
@@ -101,19 +106,15 @@ async def test_router_uses_defaults_when_override_not_passed() -> None:
 async def test_router_explicit_provider_model_override_defaults() -> None:
     used: dict[str, str] = {}
 
-    def openai_factory(model: str) -> BaseLLMProvider:
-        used["provider"] = "openai"
+    def tracking_factory(provider: str, model: str, litellm_model: str) -> BaseLLMProvider:
+        _ = litellm_model
+        used["provider"] = provider
         used["model"] = model
-        return FakeProvider(provider_name="openai", model=model)
-
-    def ollama_factory(model: str) -> BaseLLMProvider:
-        used["provider"] = "ollama"
-        used["model"] = model
-        return FakeProvider(provider_name="ollama", model=model)
+        return FakeProvider(provider_name=provider, model=model)
 
     router = LLMRouter(
         config=RouterConfig(default_provider="openai", default_model="gpt-default"),
-        provider_factories={"openai": openai_factory, "ollama": ollama_factory},
+        provider_factory=tracking_factory,
     )
 
     response = await router.complete(
@@ -131,34 +132,17 @@ async def test_router_explicit_provider_model_override_defaults() -> None:
 
 
 @pytest.mark.asyncio
-async def test_router_raises_unknown_provider_for_unregistered_key() -> None:
-    router = LLMRouter(
-        config=RouterConfig(default_provider="openai", default_model="gpt-default"),
-        provider_factories={},
-    )
-
-    with pytest.raises(UnknownProviderError):
-        await router.complete(
-            system="sys",
-            messages=_messages(),
-            max_tokens=16,
-            temperature=0.1,
-            provider="does-not-exist",
-        )
-
-
-@pytest.mark.asyncio
 async def test_router_retries_transient_failures_then_succeeds() -> None:
     flaky = FlakyProvider(provider_name="openai", model="gpt-retry")
 
-    def flaky_factory(model: str) -> BaseLLMProvider:
-        _ = model
+    def flaky_factory(provider: str, model: str, litellm_model: str) -> BaseLLMProvider:
+        _ = (provider, model, litellm_model)
         return flaky
 
     router = LLMRouter(
         config=RouterConfig(default_provider="openai", default_model="gpt-retry"),
         retry_config=RouterRetryConfig(max_attempts=4, wait_strategy=wait_none()),
-        provider_factories={"openai": flaky_factory},
+        provider_factory=flaky_factory,
     )
 
     response = await router.complete(
@@ -187,13 +171,10 @@ async def test_router_emits_prompt_and_response_hooks_with_token_fields() -> Non
     bus.subscribe("on_llm_prompt", on_prompt)
     bus.subscribe("on_llm_response", on_response)
 
-    def fake_factory(model: str) -> BaseLLMProvider:
-        return FakeProvider(provider_name="openai", model=model)
-
     router = LLMRouter(
         hook_bus=bus,
         config=RouterConfig(default_provider="openai", default_model="gpt-default"),
-        provider_factories={"openai": fake_factory},
+        provider_factory=_fake_factory,
     )
 
     await router.complete(
@@ -216,14 +197,15 @@ async def test_router_emits_prompt_and_response_hooks_with_token_fields() -> Non
 async def test_router_supports_ollama_default_provider_without_code_changes() -> None:
     captured: dict[str, str] = {}
 
-    def ollama_factory(model: str) -> BaseLLMProvider:
-        captured["provider"] = "ollama"
+    def tracking_factory(provider: str, model: str, litellm_model: str) -> BaseLLMProvider:
+        _ = litellm_model
+        captured["provider"] = provider
         captured["model"] = model
-        return FakeProvider(provider_name="ollama", model=model)
+        return FakeProvider(provider_name=provider, model=model)
 
     router = LLMRouter(
         config=RouterConfig(default_provider="ollama", default_model="qwen-local"),
-        provider_factories={"ollama": ollama_factory},
+        provider_factory=tracking_factory,
     )
 
     response = await router.complete(
@@ -249,18 +231,15 @@ def test_router_config_reads_default_provider_and_model_from_env(monkeypatch: py
 
 @pytest.mark.asyncio
 async def test_router_complete_does_not_require_catalog_loading(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_factory(model: str) -> BaseLLMProvider:
-        return FakeProvider(provider_name="openai", model=model)
+    def fail_from_discovery(cls: type[ModelCatalog]) -> ModelCatalog:
+        _ = cls
+        raise AssertionError("ModelCatalog.from_discovery should not be called for complete()")
 
-    def fail_from_yaml(cls: type[ModelCatalog], path: object) -> ModelCatalog:
-        _ = (cls, path)
-        raise AssertionError("ModelCatalog.from_yaml should not be called for complete()")
-
-    monkeypatch.setattr(ModelCatalog, "from_yaml", classmethod(fail_from_yaml))
+    monkeypatch.setattr(ModelCatalog, "from_discovery", classmethod(fail_from_discovery))
 
     router = LLMRouter(
         config=RouterConfig(default_provider="openai", default_model="gpt-default"),
-        provider_factories={"openai": fake_factory},
+        provider_factory=_fake_factory,
     )
 
     response = await router.complete(
@@ -280,19 +259,19 @@ def _catalog_for_startup_validation() -> ModelCatalog:
             ModelDescriptor(
                 provider="openai",
                 model="gpt-default",
+                litellm_model="openai/gpt-default",
                 context_window=1000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
                 suited_for=frozenset({TaskType.TRIAGE}),
             ),
         ),
-        source_path=Path("/tmp/test-catalog.yaml"),
     )
 
 
 def test_validate_startup_passes_for_valid_defaults() -> None:
     router = LLMRouter(
         config=RouterConfig(default_provider="openai", default_model="gpt-default"),
-        provider_factories={"openai": lambda model: FakeProvider(provider_name="openai", model=model)},
+        provider_factory=_fake_factory,
         model_catalog=_catalog_for_startup_validation(),
     )
 
@@ -302,7 +281,7 @@ def test_validate_startup_passes_for_valid_defaults() -> None:
 def test_validate_startup_raises_for_unregistered_default_provider() -> None:
     router = LLMRouter(
         config=RouterConfig(default_provider="ollama", default_model="gpt-default"),
-        provider_factories={"openai": lambda model: FakeProvider(provider_name="openai", model=model)},
+        provider_factory=_fake_factory,
         model_catalog=_catalog_for_startup_validation(),
     )
 
@@ -313,7 +292,7 @@ def test_validate_startup_raises_for_unregistered_default_provider() -> None:
 def test_validate_startup_raises_for_unknown_default_model() -> None:
     router = LLMRouter(
         config=RouterConfig(default_provider="openai", default_model="missing-model"),
-        provider_factories={"openai": lambda model: FakeProvider(provider_name="openai", model=model)},
+        provider_factory=_fake_factory,
         model_catalog=_catalog_for_startup_validation(),
     )
 
@@ -321,12 +300,20 @@ def test_validate_startup_raises_for_unknown_default_model() -> None:
         router.validate_startup()
 
 
-def test_validate_startup_surfaces_catalog_load_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MODEL_CATALOG_PATH", "/tmp/this-file-does-not-exist.yaml")
+def test_validate_startup_surfaces_catalog_load_error() -> None:
+    """When no catalog is provided and discovery fails, validate_startup raises."""
+    from github_auto_maintainer.core.errors import ModelCatalogValidationError
+
+    # Router with no catalog — _get_routing_policy will try from_discovery()
     router = LLMRouter(
         config=RouterConfig(default_provider="openai", default_model="gpt-default"),
-        provider_factories={"openai": lambda model: FakeProvider(provider_name="openai", model=model)},
+        provider_factory=_fake_factory,
     )
 
-    with pytest.raises(ModelCatalogLoadError, match="/tmp/this-file-does-not-exist.yaml"):
+    with (
+        patch.dict("os.environ", {}, clear=True),
+        patch("github_auto_maintainer.core.model_catalog.litellm") as mock_litellm,
+        pytest.raises((ModelCatalogLoadError, ModelCatalogValidationError)),
+    ):
+        mock_litellm.model_cost = {}
         router.validate_startup()

@@ -22,6 +22,7 @@ class LLMResponse:
     model: str
     input_tokens: int
     output_tokens: int
+    escalation_count: int = 0
 
 
 class LLMHookPayload(TypedDict):

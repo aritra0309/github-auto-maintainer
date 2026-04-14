@@ -1,12 +1,11 @@
-"""LLM router that dispatches calls to registered provider adapters."""
+"""LLM router that dispatches calls to the LiteLLM provider adapter."""
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
@@ -16,27 +15,28 @@ from github_auto_maintainer.core.errors import (
     NonRetryableProviderError,
     RouterStartupValidationError,
     TransientProviderError,
-    UnknownProviderError,
 )
 from github_auto_maintainer.core.hooks import HookBus
+from github_auto_maintainer.core.llm_types import LLMHookPayload, LLMMessage, LLMResponse
 from github_auto_maintainer.core.model_catalog import ModelCatalog
 from github_auto_maintainer.core.routing_policy import RoutingHint, RoutingPolicy
 from github_auto_maintainer.core.settings import AppSettings
 from github_auto_maintainer.core.task_types import TaskComplexity, TaskType
-from github_auto_maintainer.core.llm_types import LLMHookPayload, LLMMessage, LLMResponse
-from github_auto_maintainer.providers.anthropic import AnthropicProvider
 from github_auto_maintainer.providers.base import BaseLLMProvider
-from github_auto_maintainer.providers.grok import GrokProvider
-from github_auto_maintainer.providers.ollama import OllamaProvider
-from github_auto_maintainer.providers.openai import OpenAIProvider
+from github_auto_maintainer.providers.litellm_provider import LiteLLMProvider
 
-ProviderFactory = Callable[[str], BaseLLMProvider]
+ProviderFactory = Callable[[str, str, str], BaseLLMProvider]
 ResponseValidator = Callable[[LLMResponse], bool]
 
 
 @dataclass(slots=True)
 class RouterConfig:
-    """Runtime defaults read from environment."""
+    """Runtime defaults read from environment.
+
+    Both fields are optional. When set, they act as preference hints for
+    routing (preferred provider / model). When empty, the system picks the
+    best available model automatically via auto-discovery.
+    """
 
     default_provider: str
     default_model: str
@@ -59,48 +59,58 @@ class RouterRetryConfig:
 
 
 class LLMRouter:
-    """Routes completion requests to the selected provider adapter."""
+    """Routes completion requests to the LiteLLM provider adapter."""
 
     def __init__(
         self,
         hook_bus: HookBus | None = None,
         config: RouterConfig | None = None,
         retry_config: RouterRetryConfig | None = None,
-        provider_factories: dict[str, ProviderFactory] | None = None,
+        provider_factory: ProviderFactory | None = None,
         model_catalog: ModelCatalog | None = None,
         routing_policy: RoutingPolicy | None = None,
     ) -> None:
         self._hook_bus = hook_bus or HookBus()
         self._config = config or RouterConfig.from_env()
         self._retry_config = retry_config or RouterRetryConfig()
-        self._provider_factories = provider_factories or self._default_factories()
+        self._provider_factory = provider_factory or _default_litellm_factory
         self._model_catalog = model_catalog
         self._routing_policy = routing_policy
         if self._routing_policy is None and self._model_catalog is not None:
             self._routing_policy = RoutingPolicy(self._model_catalog)
 
     def validate_startup(self) -> None:
-        """Validate provider defaults and catalog consistency at startup."""
+        """Validate that at least one provider was detected and models are available.
+
+        If DEFAULT_PROVIDER and DEFAULT_MODEL are set, verifies they exist in
+        the catalog. If not set (empty), validation passes as long as the
+        catalog has at least one model.
+        """
+
+        catalog = self._get_routing_policy().catalog
 
         default_provider = self._config.default_provider.strip().lower()
-        if default_provider not in self._provider_factories:
-            available = ", ".join(sorted(self._provider_factories))
-            raise RouterStartupValidationError(
-                "DEFAULT_PROVIDER is not registered: "
-                f"'{default_provider}'. Available providers: [{available}]"
-            )
-
         default_model = self._config.default_model.strip()
-        catalog = self._get_routing_policy().catalog
-        model_found = any(
-            descriptor.provider == default_provider and descriptor.model == default_model
-            for descriptor in catalog.models
-        )
-        if not model_found:
+
+        # If defaults are set, verify they exist in the catalog
+        if default_provider and default_model:
+            model_found = any(
+                descriptor.provider == default_provider
+                and descriptor.model == default_model
+                for descriptor in catalog.models
+            )
+            if not model_found:
+                raise RouterStartupValidationError(
+                    "DEFAULT_MODEL is not present for DEFAULT_PROVIDER in model catalog: "
+                    f"provider='{default_provider}' model='{default_model}'"
+                )
+
+        # Verify at least one model exists (discovery already enforces this,
+        # but belt-and-suspenders)
+        if not catalog.models:
             raise RouterStartupValidationError(
-                "DEFAULT_MODEL is not present for DEFAULT_PROVIDER in model catalog: "
-                f"provider='{default_provider}' model='{default_model}' "
-                f"catalog='{catalog.source_path}'"
+                "Model catalog is empty — no models were discovered. "
+                "Set at least one LLM provider API key."
             )
 
     async def complete(
@@ -112,8 +122,22 @@ class LLMRouter:
         provider: str | None = None,
         model: str | None = None,
     ) -> LLMResponse:
-        selected_provider = (provider or self._config.default_provider).strip().lower()
-        selected_model = (model or self._config.default_model).strip()
+        selected_provider = provider or self._config.default_provider or None
+        selected_model = model or self._config.default_model or None
+
+        # If no explicit provider/model, use the first model from the catalog
+        if not selected_provider or not selected_model:
+            catalog = self._get_routing_policy().catalog
+            first = catalog.models[0]
+            selected_provider = selected_provider or first.provider
+            selected_model = selected_model or first.model
+
+        selected_provider = selected_provider.strip().lower()
+        selected_model = selected_model.strip()
+
+        # Look up the litellm_model string from the catalog
+        litellm_model = self._resolve_litellm_model(selected_provider, selected_model)
+
         prompt_hash = _hash_prompt(
             system=system,
             messages=messages,
@@ -135,6 +159,7 @@ class LLMRouter:
         response = await self._complete_with_retry(
             provider=selected_provider,
             model=selected_model,
+            litellm_model=litellm_model,
             system=system,
             messages=messages,
             max_tokens=max_tokens,
@@ -195,16 +220,28 @@ class LLMRouter:
         routing_policy = self._get_routing_policy()
         last_response: LLMResponse | None = None
         no_candidate_errors: list[str] = []
-        for tier in routing_policy.escalation_chain(complexity):
+        attempts = 0
+        for target_tier in routing_policy.escalation_chain(complexity):
             try:
-                response = await self.complete_task(
+                descriptor = routing_policy.select_for_tier(
+                    task_type=task_type,
+                    target_tier=target_tier,
+                    hint=hint,
+                )
+            except NoModelCandidateError as exc:
+                no_candidate_errors.append(str(exc))
+                continue
+
+            attempts += 1
+
+            try:
+                response = await self.complete(
                     system=system,
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
-                    task_type=task_type,
-                    complexity=tier,
-                    hint=hint,
+                    provider=descriptor.provider,
+                    model=descriptor.model,
                 )
             except NoModelCandidateError as exc:
                 no_candidate_errors.append(str(exc))
@@ -212,10 +249,12 @@ class LLMRouter:
 
             last_response = response
             if validate(response):
-                return response
+                escalation_count = attempts - 1
+                return replace(response, escalation_count=escalation_count)
 
         if last_response is not None:
-            return last_response
+            escalation_count = attempts - 1
+            return replace(last_response, escalation_count=escalation_count)
 
         joined_errors = "; ".join(no_candidate_errors)
         raise NoModelCandidateError(
@@ -224,11 +263,29 @@ class LLMRouter:
             f"Details: {joined_errors}"
         )
 
+    def _resolve_litellm_model(self, provider: str, model: str) -> str:
+        """Look up the litellm_model string from the catalog.
+
+        Falls back to ``"{provider}/{model}"`` if not found in the catalog
+        (e.g. when using direct ``complete()`` calls with ad-hoc models).
+        Does **not** force catalog loading — if no catalog is available yet,
+        returns the fallback immediately.
+        """
+        if self._routing_policy is not None:
+            catalog = self._routing_policy.catalog
+            for descriptor in catalog.models:
+                if descriptor.provider == provider and descriptor.model == model:
+                    return descriptor.litellm_model
+        elif self._model_catalog is not None:
+            for descriptor in self._model_catalog.models:
+                if descriptor.provider == provider and descriptor.model == model:
+                    return descriptor.litellm_model
+        return f"{provider}/{model}"
+
     def _get_routing_policy(self) -> RoutingPolicy:
         if self._routing_policy is None:
             if self._model_catalog is None:
-                settings = AppSettings()
-                self._model_catalog = ModelCatalog.from_yaml(settings.model_catalog_path)
+                self._model_catalog = ModelCatalog.from_discovery()
             self._routing_policy = RoutingPolicy(self._model_catalog)
         return self._routing_policy
 
@@ -236,6 +293,7 @@ class LLMRouter:
         self,
         provider: str,
         model: str,
+        litellm_model: str,
         system: str,
         messages: Sequence[LLMMessage],
         max_tokens: int,
@@ -249,7 +307,11 @@ class LLMRouter:
         )
         async for attempt in retrying:
             with attempt:
-                adapter = self._build_provider(provider=provider, model=model)
+                adapter = self._build_provider(
+                    provider=provider,
+                    model=model,
+                    litellm_model=litellm_model,
+                )
                 return await adapter.complete(
                     system=system,
                     messages=messages,
@@ -259,31 +321,15 @@ class LLMRouter:
 
         raise NonRetryableProviderError("Provider call failed without producing a response")
 
-    def _build_provider(self, provider: str, model: str) -> BaseLLMProvider:
-        factory = self._provider_factories.get(provider)
-        if factory is None:
-            raise UnknownProviderError(f"No provider registered for '{provider}'")
-        return factory(model)
+    def _build_provider(
+        self, provider: str, model: str, litellm_model: str
+    ) -> BaseLLMProvider:
+        return self._provider_factory(provider, model, litellm_model)
 
-    def _default_factories(self) -> dict[str, ProviderFactory]:
-        def anthropic_factory(model: str) -> BaseLLMProvider:
-            return AnthropicProvider(model=model, api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-        def openai_factory(model: str) -> BaseLLMProvider:
-            return OpenAIProvider(model=model, api_key=os.getenv("OPENAI_API_KEY"))
-
-        def grok_factory(model: str) -> BaseLLMProvider:
-            return GrokProvider(model=model, api_key=os.getenv("GROK_API_KEY"))
-
-        def ollama_factory(model: str) -> BaseLLMProvider:
-            return OllamaProvider(model=model, base_url=os.getenv("OLLAMA_BASE_URL"))
-
-        return {
-            "anthropic": anthropic_factory,
-            "openai": openai_factory,
-            "grok": grok_factory,
-            "ollama": ollama_factory,
-        }
+def _default_litellm_factory(provider: str, model: str, litellm_model: str) -> BaseLLMProvider:
+    """Default factory that creates a LiteLLMProvider instance."""
+    return LiteLLMProvider(litellm_model=litellm_model, provider=provider, model=model)
 
 
 def _hash_prompt(

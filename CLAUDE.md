@@ -18,10 +18,10 @@ Design goals:
 ### Completed
 
 **Phase 1 — Deterministic Routing + Typed Settings** ✅
-- Model catalog (`config/models.yaml` → `core/model_catalog.py`), typed settings, task types, routing policy.
+- Auto-discovery model catalog (`core/model_catalog.py`), typed settings, task types, routing policy with 6-tier cost bucketing.
 - LLM router with `complete()`, `complete_task()`, `complete_with_escalation()`.
 - Hook bus for prompt/response observability.
-- Four provider adapters: OpenAI, Anthropic, Grok, Ollama.
+- Unified LLM provider via LiteLLM (`providers/litellm_provider.py`), supporting 100+ backends through a single adapter.
 - Error hierarchy, startup validation, frozen dataclass value objects.
 
 **Phase 2 — Webhook Ingress + GitHub App Auth + Queue** ✅
@@ -67,12 +67,20 @@ Design goals:
 - Server wiring: `AutoFixSkill` conditionally enabled via `AUTO_FIX_ENABLED` env var, with `SQLiteRunStore` persistence.
 - Integration tests (`tests/integration/test_auto_fix_pipeline.py`) covering happy path, LLM rejection, safety rejection, dry-run, allowlist rejection, and run store persistence.
 
+**Phase 6 — Deployment + Observability + Portfolio Polish** ✅
+- Structured logging via structlog (`core/logging_config.py`): JSON in production, coloured console in dev (`LOG_FORMAT=dev`). Secret redaction via `core/logging_utils.py`.
+- Observability: `escalation_count` on `LLMResponse`, `LoggingHookSubscriber` wired to hook bus (`core/hook_subscribers.py`), `RequestTimingMiddleware` logging per-request latency + `X-Request-ID` header (`server/middleware.py`).
+- Dockerfile (multi-stage, non-root user, health check, SQLite volume) and `docker-compose.yml`.
+- Deployment docs: `docs/deploy.md`, `docs/security.md`, `docs/ops.md`.
+- GitHub Actions workflow mode: single-shot CLI (`cli.py`) + `.github/workflows/maintainer.yml` for serverless event processing.
+- Resilience tests (`tests/resilience/test_chaos.py`): duplicate delivery idempotency, LLM provider outage, GitHub API 429.
+- Container smoke tests (`tests/smoke/test_container.py`): Docker build, health endpoint, webhook acceptance/rejection.
+- CLI tests (`tests/test_cli.py`).
+- mypy fix: targeted `# type: ignore[attr-defined]` on litellm exception aliases in `providers/litellm_provider.py`.
+
 ### Next Up
 
-**Phase 6 — Deployment + Observability + Portfolio Polish**
-- Dockerfile, docker-compose, deployment docs.
-- Metrics/logging: event_id, delivery_id, selected_model, escalation_count, latency.
-- Container smoke tests, staging repo soak tests.
+All planned phases complete. See `improvement.md` for future enhancement ideas.
 
 ### Explicitly Out of Scope for v1
 - Multi-agent orchestration, memory/history graph, line-level review comments, autonomous merges, GraphQL, UI dashboard.
@@ -138,10 +146,10 @@ Auto-fix path (Phase 5):
 
 Deterministic and policy-based — model choice is never delegated to an LLM.
 
-1. **Model Catalog** (`config/models.yaml` → `core/model_catalog.py`): YAML-defined model descriptors with provider, context window, cost tier, and `suited_for` task types.
+1. **Model Catalog** (`core/model_catalog.py`): Auto-discovery engine that detects available providers from API keys, scans LiteLLM's live model registry, computes 6-tier cost bucketing from real pricing data, and auto-assigns task types. Optional overrides via `config/models_override.yaml`. `ModelDescriptor` fields: provider, model, context_window, cost_tier (int 0–5), suited_for, litellm_model, input_cost, output_cost, supports_vision, supports_function_calling.
 2. **Task Types** (`core/task_types.py`): `TaskType` enum and `TaskComplexity` enum drive all routing.
 3. **Routing Policy** (`core/routing_policy.py`): Multi-key sort (tier distance → preferred provider → local preference → cost → context window → name). Fixed escalation chains: low→medium→high.
-4. **LLM Router** (`core/llm_router.py`): `complete()` (direct), `complete_task()` (routed), `complete_with_escalation()` (tiered with validation callback).
+4. **LLM Router** (`core/llm_router.py`): `complete()` (direct), `complete_task()` (routed), `complete_with_escalation()` (tiered with validation callback). Single `LiteLLMProvider` adapter (`providers/litellm_provider.py`) wraps `litellm.acompletion()` for all backends.
 5. **Hook Bus** (`core/hooks.py`): Async `on_llm_prompt` and `on_llm_response` hooks.
 
 ### Skill Pipeline
@@ -196,6 +204,23 @@ issue_number = event.payload["issue"]["number"]
 sender_login = event.payload["sender"]["login"]
 ```
 
+### ModelDescriptor Fields
+
+```python
+@dataclass(frozen=True, slots=True)
+class ModelDescriptor:
+    provider: str                            # "anthropic", "openai", etc.
+    model: str                               # model name from registry
+    context_window: int                      # from litellm.model_cost (auto-populated)
+    cost_tier: int                           # 0–5, from percentile bucketing (auto-computed)
+    suited_for: frozenset[TaskType]          # from tier + capabilities (auto-assigned)
+    litellm_model: str                       # auto-generated: "{prefix}/{model}"
+    input_cost: float = 0.0                  # real $/token (auto-populated)
+    output_cost: float = 0.0                 # real $/token (auto-populated)
+    supports_vision: bool = False            # from registry (auto-populated)
+    supports_function_calling: bool = False  # from registry (auto-populated)
+```
+
 ### Existing Signatures to Call Into
 
 ```python
@@ -240,7 +265,7 @@ open_fix_pr(client, owner, repo, title, body, head, base) -> CreatedPullRequest
 - **pytest-asyncio** with `asyncio_mode = "auto"` — async tests use `@pytest.mark.asyncio` by convention.
 - **Frozen dataclasses** (`frozen=True, slots=True`) for all value objects.
 - **Error hierarchy**: `LLMRouterError` tree for router/provider errors, `GitHubClientError` tree for GitHub API errors, `SkillError` tree for skill execution/parsing errors, `AutomationError` tree for auto-fix pipeline errors. All four trees inherit from `Exception` directly — they are intentionally separate.
-- **Tests use fake providers** (not mocks) — `FakeProvider` subclasses `BaseLLMProvider` and returns canned `LLMResponse` objects. For skill tests, variants return canned JSON matching the decision schema.
+- **Tests use fake providers** (not mocks) — `FakeProvider` satisfies the `BaseLLMProvider` protocol and returns canned `LLMResponse` objects. `LiteLLMProvider` tests use `unittest.mock.patch` on `litellm.acompletion`. For skill tests, variants return canned JSON matching the decision schema.
 - **respx** for httpx mocking in GitHub client and skill tests.
 - **`json.loads()` returns `Any`** — when declaring typed return values, assign to an explicitly typed intermediate variable to satisfy mypy strict (e.g., `data: dict[str, Any] = json.loads(...)`).
 
@@ -261,10 +286,24 @@ open_fix_pr(client, owner, repo, title, body, head, base) -> CreatedPullRequest
 - Safety validation runs before any git write operation in the auto-fix pipeline.
 - No subprocess git, no `shell=True`, no GraphQL — all git operations use the GitHub REST API.
 - Auto-fix run metadata is persisted before and after every pipeline stage.
+- All LLM calls go through a single `LiteLLMProvider` — no per-provider adapter code. Adding a new provider is env-var-only (set the API key, restart).
 
 ## Adding New Providers
 
-See `CONTRIBUTING.md`. Key steps: implement `BaseLLMProvider`, register factory in `LLMRouter._default_factories()`, add env vars to `.env.example`, add model entries to `config/models.yaml`.
+All providers are handled by a single `LiteLLMProvider` backed by LiteLLM with auto-discovery:
+
+1. Set the required API key env var (e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `NVIDIA_NIM_API_KEY`).
+2. Restart the server. The discovery engine automatically detects the new provider, scans LiteLLM's registry for available models, computes cost tiers, and assigns task types.
+3. No code or config changes needed. Optionally use `config/models_override.yaml` to exclude models or override tier/task assignments.
+
+Supported providers (auto-detected from env vars):
+- `ANTHROPIC_API_KEY` → Anthropic (Claude)
+- `OPENAI_API_KEY` → OpenAI (GPT)
+- `GOOGLE_API_KEY` → Google (Gemini)
+- `XAI_API_KEY` → xAI (Grok)
+- `OLLAMA_API_BASE` → Ollama (local models, always tier 0)
+- `OPENROUTER_API_KEY` → OpenRouter (hundreds of models via one key)
+- `NVIDIA_NIM_API_KEY` → NVIDIA NIM (build.nvidia.com)
 
 ## Adding New Skills
 
@@ -288,3 +327,4 @@ GitHub Actions (`.github/workflows/ci.yml`) runs on PRs and pushes to main: star
 - `89c358f` — Rewrote the README with clearer project narrative and implementation context.
 - `720ef50` — Added triage skills and server workflow (Phases 2–3).
 - `4d3043c` — Phase 4: Orchestrator, write actions, idempotency, action policy, integration tests.
+- `[phase-6]` — Phase 6: Deployment, observability, Docker, GitHub Actions workflow mode, resilience tests, portfolio polish.

@@ -17,6 +17,8 @@ def test_main_exits_with_non_zero_on_startup_validation_failure(
         raise RouterStartupValidationError("invalid defaults")
 
     monkeypatch.setattr(LLMRouter, "validate_startup", fail_validation)
+    # Ensure argparse sees "serve" (or no subcommand) instead of pytest args.
+    monkeypatch.setattr("sys.argv", ["github-maintainer", "serve"])
 
     with pytest.raises(SystemExit, match="1"):
         __main__.main()
@@ -36,6 +38,8 @@ def test_main_prints_validated_bootstrap_line(
     monkeypatch.setenv("DEFAULT_PROVIDER", "openai")
     monkeypatch.setenv("DEFAULT_MODEL", "gpt-5.4-mini")
     monkeypatch.setattr(LLMRouter, "validate_startup", pass_validation)
+    # Ensure argparse sees "serve" instead of pytest args.
+    monkeypatch.setattr("sys.argv", ["github-maintainer", "serve"])
 
     uvicorn_calls: list[dict[str, Any]] = []
 

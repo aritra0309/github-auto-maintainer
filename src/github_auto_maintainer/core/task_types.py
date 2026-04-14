@@ -39,3 +39,12 @@ class TaskType(StrEnum):
     OFFLINE_PATCH_GENERATION = "offline_patch_generation"
     CODE_REVIEW = "code_review"
     REFACTORING = "refactoring"
+
+
+# Maps skill-facing TaskComplexity to the integer target tier used by the routing policy.
+# Tiers range from 0 (free/local) to 5 (most expensive frontier models).
+TARGET_TIER: dict[TaskComplexity, int] = {
+    TaskComplexity.LOW: 1,
+    TaskComplexity.MEDIUM: 3,
+    TaskComplexity.HIGH: 5,
+}

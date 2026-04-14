@@ -6,13 +6,7 @@ from dataclasses import dataclass
 
 from github_auto_maintainer.core.errors import NoModelCandidateError
 from github_auto_maintainer.core.model_catalog import ModelCatalog, ModelDescriptor
-from github_auto_maintainer.core.task_types import TaskComplexity, TaskType
-
-_TIER_ORDER: dict[TaskComplexity, int] = {
-    TaskComplexity.LOW: 0,
-    TaskComplexity.MEDIUM: 1,
-    TaskComplexity.HIGH: 2,
-}
+from github_auto_maintainer.core.task_types import TARGET_TIER, TaskComplexity, TaskType
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,7 +15,7 @@ class RoutingHint:
 
     prefer_local: bool = False
     preferred_provider: str | None = None
-    max_cost_tier: TaskComplexity | None = None
+    max_cost_tier: int | None = None
 
 
 class RoutingPolicy:
@@ -36,14 +30,14 @@ class RoutingPolicy:
 
         return self._catalog
 
-    def escalation_chain(self, complexity: TaskComplexity) -> tuple[TaskComplexity, ...]:
-        """Return deterministic complexity escalation order from starting tier."""
+    def escalation_chain(self, complexity: TaskComplexity) -> tuple[int, ...]:
+        """Return deterministic target tier escalation order from starting complexity."""
 
         if complexity == TaskComplexity.LOW:
-            return (TaskComplexity.LOW, TaskComplexity.MEDIUM, TaskComplexity.HIGH)
+            return (1, 3, 5)
         if complexity == TaskComplexity.MEDIUM:
-            return (TaskComplexity.MEDIUM, TaskComplexity.HIGH)
-        return (TaskComplexity.HIGH,)
+            return (3, 5)
+        return (5,)
 
     def select(
         self,
@@ -53,6 +47,28 @@ class RoutingPolicy:
         hint: RoutingHint | None = None,
     ) -> ModelDescriptor:
         """Select best model for a task and complexity using deterministic tie-breakers."""
+
+        target_tier = TARGET_TIER[complexity]
+        return self.select_for_tier(
+            task_type=task_type,
+            target_tier=target_tier,
+            hint=hint,
+        )
+
+    def select_for_tier(
+        self,
+        *,
+        task_type: TaskType,
+        target_tier: int,
+        hint: RoutingHint | None = None,
+    ) -> ModelDescriptor:
+        """Select best model for a task at a specific target tier.
+
+        This is the core selection method. ``select()`` delegates here after
+        mapping ``TaskComplexity`` to an int tier. The escalation loop in
+        ``LLMRouter`` calls this directly with int tiers from
+        ``escalation_chain()``.
+        """
 
         resolved_hint = hint or RoutingHint()
         preferred_provider = _normalized_provider(resolved_hint.preferred_provider)
@@ -64,17 +80,16 @@ class RoutingPolicy:
         ]
 
         if resolved_hint.max_cost_tier is not None:
-            max_rank = _TIER_ORDER[resolved_hint.max_cost_tier]
             candidates = [
                 descriptor
                 for descriptor in candidates
-                if _TIER_ORDER[descriptor.cost_tier] <= max_rank
+                if descriptor.cost_tier <= resolved_hint.max_cost_tier
             ]
 
         if not candidates:
             raise NoModelCandidateError(
                 "No model candidates for "
-                f"task='{task_type.value}' complexity='{complexity.value}' "
+                f"task='{task_type.value}' target_tier={target_tier} "
                 f"with hint={resolved_hint}"
             )
 
@@ -82,7 +97,7 @@ class RoutingPolicy:
             candidates,
             key=lambda descriptor: _selection_sort_key(
                 descriptor=descriptor,
-                requested_complexity=complexity,
+                target_tier=target_tier,
                 preferred_provider=preferred_provider,
                 prefer_local=resolved_hint.prefer_local,
             ),
@@ -93,13 +108,11 @@ class RoutingPolicy:
 def _selection_sort_key(
     *,
     descriptor: ModelDescriptor,
-    requested_complexity: TaskComplexity,
+    target_tier: int,
     preferred_provider: str | None,
     prefer_local: bool,
 ) -> tuple[int, int, int, int, int, str, str]:
-    requested_rank = _TIER_ORDER[requested_complexity]
-    descriptor_rank = _TIER_ORDER[descriptor.cost_tier]
-    tier_distance = abs(descriptor_rank - requested_rank)
+    tier_distance = abs(descriptor.cost_tier - target_tier)
 
     preferred_provider_penalty = 0
     if preferred_provider is not None and descriptor.provider != preferred_provider:
@@ -109,13 +122,11 @@ def _selection_sort_key(
     if prefer_local and descriptor.provider != "ollama":
         local_penalty = 1
 
-    cost_rank = _TIER_ORDER[descriptor.cost_tier]
-
     return (
         tier_distance,
         preferred_provider_penalty,
         local_penalty,
-        cost_rank,
+        descriptor.cost_tier,
         -descriptor.context_window,
         descriptor.provider,
         descriptor.model,

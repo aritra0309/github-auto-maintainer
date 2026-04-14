@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 
 import pytest
 
@@ -11,7 +10,7 @@ from github_auto_maintainer.core.task_types import TaskComplexity, TaskType
 
 
 def _catalog(*models: ModelDescriptor) -> ModelCatalog:
-    return ModelCatalog(models=tuple(models), source_path=Path("/tmp/test-models.yaml"))
+    return ModelCatalog(models=tuple(models))
 
 
 def _descriptor(
@@ -19,12 +18,13 @@ def _descriptor(
     provider: str,
     model: str,
     context_window: int,
-    cost_tier: TaskComplexity,
+    cost_tier: int,
     suited_for: set[TaskType] | None = None,
 ) -> ModelDescriptor:
     return ModelDescriptor(
         provider=provider,
         model=model,
+        litellm_model=f"{provider}/{model}",
         context_window=context_window,
         cost_tier=cost_tier,
         suited_for=frozenset(suited_for or {TaskType.TRIAGE}),
@@ -38,13 +38,13 @@ def test_select_is_deterministic_for_task_and_complexity() -> None:
                 provider="openai",
                 model="gpt-5.4-mini",
                 context_window=1_000_000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
             _descriptor(
                 provider="anthropic",
                 model="claude-sonnet-4-6",
                 context_window=1_000_000,
-                cost_tier=TaskComplexity.MEDIUM,
+                cost_tier=3,
             ),
         )
     )
@@ -63,13 +63,13 @@ def test_select_uses_lexical_tiebreak_for_equal_candidates() -> None:
                 provider="openai",
                 model="z-model",
                 context_window=1000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
             _descriptor(
                 provider="openai",
                 model="a-model",
                 context_window=1000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
         )
     )
@@ -86,13 +86,13 @@ def test_select_prefers_larger_context_window_before_lexical_tiebreak() -> None:
                 provider="openai",
                 model="a-model",
                 context_window=1000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
             _descriptor(
                 provider="openai",
                 model="z-model",
                 context_window=2000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
         )
     )
@@ -109,13 +109,13 @@ def test_select_prefers_lower_cost_tier_before_context_window() -> None:
                 provider="openai",
                 model="low-cost-smaller-context",
                 context_window=1000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
             _descriptor(
                 provider="openai",
                 model="high-cost-larger-context",
                 context_window=100000,
-                cost_tier=TaskComplexity.HIGH,
+                cost_tier=5,
             ),
         )
     )
@@ -132,13 +132,13 @@ def test_select_prefers_local_when_other_factors_are_comparable() -> None:
                 provider="openai",
                 model="gpt-5.4-mini",
                 context_window=2000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
             _descriptor(
                 provider="ollama",
                 model="llama4:scout",
                 context_window=1000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
         )
     )
@@ -159,13 +159,13 @@ def test_select_prefers_requested_provider() -> None:
                 provider="openai",
                 model="gpt-5.4-mini",
                 context_window=2000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
             _descriptor(
                 provider="grok",
                 model="grok-4-1-fast-non-reasoning",
                 context_window=2000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             ),
         )
     )
@@ -186,14 +186,14 @@ def test_select_applies_max_cost_tier_filter() -> None:
                 provider="anthropic",
                 model="claude-sonnet-4-6",
                 context_window=1_000_000,
-                cost_tier=TaskComplexity.MEDIUM,
+                cost_tier=3,
                 suited_for={TaskType.PATCH_GENERATION},
             ),
             _descriptor(
                 provider="openai",
                 model="gpt-5.4-mini",
                 context_window=1_000_000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
                 suited_for={TaskType.PATCH_GENERATION},
             ),
         )
@@ -202,7 +202,7 @@ def test_select_applies_max_cost_tier_filter() -> None:
     selected = policy.select(
         task_type=TaskType.PATCH_GENERATION,
         complexity=TaskComplexity.HIGH,
-        hint=RoutingHint(max_cost_tier=TaskComplexity.LOW),
+        hint=RoutingHint(max_cost_tier=1),
     )
 
     assert (selected.provider, selected.model) == ("openai", "gpt-5.4-mini")
@@ -215,7 +215,7 @@ def test_select_raises_when_no_candidate_after_filters() -> None:
                 provider="anthropic",
                 model="claude-opus-4-6",
                 context_window=1_000_000,
-                cost_tier=TaskComplexity.HIGH,
+                cost_tier=5,
                 suited_for={TaskType.PATCH_GENERATION},
             )
         )
@@ -225,7 +225,7 @@ def test_select_raises_when_no_candidate_after_filters() -> None:
         policy.select(
             task_type=TaskType.PATCH_GENERATION,
             complexity=TaskComplexity.LOW,
-            hint=RoutingHint(max_cost_tier=TaskComplexity.LOW),
+            hint=RoutingHint(max_cost_tier=1),
         )
 
 
@@ -236,18 +236,11 @@ def test_escalation_chain_order_is_deterministic() -> None:
                 provider="openai",
                 model="gpt-5.4-mini",
                 context_window=1_000_000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
             )
         )
     )
 
-    assert policy.escalation_chain(TaskComplexity.LOW) == (
-        TaskComplexity.LOW,
-        TaskComplexity.MEDIUM,
-        TaskComplexity.HIGH,
-    )
-    assert policy.escalation_chain(TaskComplexity.MEDIUM) == (
-        TaskComplexity.MEDIUM,
-        TaskComplexity.HIGH,
-    )
-    assert policy.escalation_chain(TaskComplexity.HIGH) == (TaskComplexity.HIGH,)
+    assert policy.escalation_chain(TaskComplexity.LOW) == (1, 3, 5)
+    assert policy.escalation_chain(TaskComplexity.MEDIUM) == (3, 5)
+    assert policy.escalation_chain(TaskComplexity.HIGH) == (5,)

@@ -42,6 +42,7 @@ class SkillResult(Generic[T]):
     complexity_used: TaskComplexity
     elapsed_seconds: float
     planned_actions: tuple[ActionRequest, ...] = ()
+    escalation_count: int = 0
 
 
 class BaseSkill(ABC):

@@ -66,16 +66,16 @@ def _make_router(response_content: str) -> LLMRouter:
             ModelDescriptor(
                 provider="fake",
                 model="fake-model",
+                litellm_model="fake/fake-model",
                 context_window=8000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
                 suited_for=frozenset({TaskType.SUMMARIZATION}),
             ),
         ),
-        source_path=Path("/tmp/test-catalog.yaml"),
     )
     return LLMRouter(
         config=RouterConfig(default_provider="fake", default_model="fake-model"),
-        provider_factories={"fake": lambda model: FakeProvider(response_content)},
+        provider_factory=lambda p, m, lm: FakeProvider(response_content),
         model_catalog=catalog,
         routing_policy=RoutingPolicy(catalog),
     )
