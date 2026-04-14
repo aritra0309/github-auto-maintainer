@@ -134,4 +134,5 @@ class IssueResponseSkill(BaseSkill):
                     body=decision.response_body,
                 ),
             ),
+            escalation_count=response.escalation_count,
         )

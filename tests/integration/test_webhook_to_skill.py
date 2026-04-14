@@ -27,7 +27,7 @@ from github_auto_maintainer.core.llm_router import LLMRouter, RouterConfig
 from github_auto_maintainer.core.llm_types import LLMMessage, LLMResponse
 from github_auto_maintainer.core.model_catalog import ModelCatalog, ModelDescriptor
 from github_auto_maintainer.core.routing_policy import RoutingPolicy
-from github_auto_maintainer.core.task_types import TaskComplexity, TaskType
+from github_auto_maintainer.core.task_types import TaskType
 from github_auto_maintainer.github.auth import InstallationAccessToken
 from github_auto_maintainer.github.events import NormalizedEvent
 from github_auto_maintainer.providers.base import BaseLLMProvider
@@ -69,20 +69,20 @@ def _make_router(golden_content: str) -> LLMRouter:
             ModelDescriptor(
                 provider="fake",
                 model="fake-model",
+                litellm_model="fake/fake-model",
                 context_window=8000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
                 suited_for=frozenset(
                     {TaskType.TRIAGE, TaskType.DEEP_REVIEW,
                      TaskType.SUMMARIZATION, TaskType.CLASSIFICATION}
                 ),
             ),
         ),
-        source_path=Path("/tmp/test-catalog.yaml"),
     )
     provider = _FakeProvider(golden_content)
     return LLMRouter(
         config=RouterConfig(default_provider="fake", default_model="fake-model"),
-        provider_factories={"fake": lambda model: provider},
+        provider_factory=lambda p, m, lm: provider,
         model_catalog=catalog,
         routing_policy=RoutingPolicy(catalog),
     )
@@ -212,7 +212,7 @@ async def test_webhook_to_skill_pr_triage(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(
         "github_auto_maintainer.server.app.structlog.get_logger",
-        lambda: recording_logger,
+        lambda *_args, **_kwargs: recording_logger,
     )
 
     # 6. Create the app with injectable dependencies

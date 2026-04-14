@@ -289,4 +289,5 @@ def _log_skill_result(
         decision=decision_data,
         recommended_actions=list(result.recommended_actions),
         planned_actions_count=len(result.planned_actions),
+        escalation_count=result.escalation_count,
     )

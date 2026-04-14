@@ -189,6 +189,12 @@ class AutoFixSkill(BaseSkill):
 
         # 6. Check if LLM says it can't fix
         if not decision.can_fix:
+            _logger.info(
+                "auto_fix.llm_rejected",
+                owner=owner, repo=repo, issue_number=issue_number,
+                reason=decision.rejection_reason,
+                run_id=run_id,
+            )
             await self._run_store.update_run(
                 run_id, status=RunStatus.REJECTED,
                 error_message=decision.rejection_reason,
@@ -217,6 +223,7 @@ class AutoFixSkill(BaseSkill):
                         issue_number=issue_number, body=rejection_body,
                     ),
                 ),
+                escalation_count=response.escalation_count,
             )
 
         # 7. Safety validation
@@ -232,6 +239,12 @@ class AutoFixSkill(BaseSkill):
         all_violations = path_violations + size_violations
 
         if all_violations:
+            _logger.warning(
+                "auto_fix.safety_rejected",
+                owner=owner, repo=repo, issue_number=issue_number,
+                violations=[str(v) for v in all_violations],
+                run_id=run_id,
+            )
             violation_strs = tuple(
                 f"{v.rule}: {v.detail}" for v in all_violations
             )
@@ -265,9 +278,16 @@ class AutoFixSkill(BaseSkill):
                         issue_number=issue_number, body=safety_body,
                     ),
                 ),
+                escalation_count=response.escalation_count,
             )
 
         # 8. Perform git operations
+        _logger.info(
+            "auto_fix.patching_started",
+            owner=owner, repo=repo, issue_number=issue_number,
+            file_count=len(decision.files_to_modify),
+            run_id=run_id,
+        )
         await self._run_store.update_run(run_id, status=RunStatus.PATCHING)
 
         patches = [
@@ -358,6 +378,12 @@ class AutoFixSkill(BaseSkill):
         )
 
         # 10. Return follow-up comment action
+        _logger.info(
+            "auto_fix.pipeline_completed",
+            owner=owner, repo=repo, issue_number=issue_number,
+            pr_number=created_pr.number, pr_url=created_pr.html_url,
+            run_id=run_id,
+        )
         comment_body = (
             f"🤖 **Auto-fix PR opened:** {created_pr.html_url}\n\n"
             f"**Branch:** `{branch_name}`\n"

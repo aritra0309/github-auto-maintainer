@@ -28,7 +28,7 @@ from github_auto_maintainer.core.model_catalog import ModelCatalog, ModelDescrip
 from github_auto_maintainer.core.orchestrator import Orchestrator
 from github_auto_maintainer.core.routing_policy import RoutingPolicy
 from github_auto_maintainer.core.run_store import InMemoryRunStore, RunStatus
-from github_auto_maintainer.core.task_types import TaskComplexity, TaskType
+from github_auto_maintainer.core.task_types import TaskType
 from github_auto_maintainer.github.events import NormalizedEvent
 from github_auto_maintainer.providers.base import BaseLLMProvider
 
@@ -76,8 +76,9 @@ def _make_router(golden_responses: list[str]) -> tuple[LLMRouter, _FakeProvider]
             ModelDescriptor(
                 provider="fake",
                 model="fake-model",
+                litellm_model="fake/fake-model",
                 context_window=8000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
                 suited_for=frozenset(
                     {TaskType.TRIAGE, TaskType.DEEP_REVIEW,
                      TaskType.SUMMARIZATION, TaskType.CLASSIFICATION,
@@ -85,12 +86,11 @@ def _make_router(golden_responses: list[str]) -> tuple[LLMRouter, _FakeProvider]
                 ),
             ),
         ),
-        source_path=Path("/tmp/test-catalog.yaml"),
     )
     provider = _FakeProvider(golden_responses)
     router = LLMRouter(
         config=RouterConfig(default_provider="fake", default_model="fake-model"),
-        provider_factories={"fake": lambda model: provider},
+        provider_factory=lambda p, m, lm: provider,
         model_catalog=catalog,
         routing_policy=RoutingPolicy(catalog),
     )

@@ -10,16 +10,21 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+import litellm
 import structlog
 from fastapi import FastAPI, HTTPException, Request, status
 
 from github_auto_maintainer.core.action_policy import ActionPolicy
+from github_auto_maintainer.core.hook_subscribers import LoggingHookSubscriber
 from github_auto_maintainer.core.idempotency import InMemoryIdempotencyStore
 from github_auto_maintainer.core.job_queue import InMemoryJobQueue, JobQueue
 from github_auto_maintainer.core.llm_router import LLMRouter
+from github_auto_maintainer.core.logging_config import configure_logging
+from github_auto_maintainer.core.model_catalog import ModelCatalog
 from github_auto_maintainer.core.orchestrator import Orchestrator
 from github_auto_maintainer.github.auth import load_private_key_pem
 from github_auto_maintainer.github.events import NormalizedEvent, normalize_github_event
+from github_auto_maintainer.server.middleware import RequestTimingMiddleware
 from github_auto_maintainer.server.webhooks import (
     InvalidSignatureError,
     MalformedSignatureError,
@@ -31,6 +36,12 @@ from github_auto_maintainer.skills.base import BaseSkill
 from github_auto_maintainer.skills.issue_label import IssueLabelSkill
 from github_auto_maintainer.skills.issue_response import IssueResponseSkill
 from github_auto_maintainer.skills.pr_summary import PRSummarySkill
+
+# Suppress LiteLLM telemetry at import time
+litellm.telemetry = False
+
+# Configure structured logging at module level (idempotent)
+configure_logging()
 
 
 def create_app(
@@ -69,7 +80,27 @@ def create_app(
                 # File exists — any read error (permissions, encoding) is a hard failure.
                 private_key_pem = load_private_key_pem(key_path)
 
-                llm_router = router or LLMRouter()
+                # Build model catalog via auto-discovery
+                if router is not None:
+                    llm_router = router
+                else:
+                    catalog = ModelCatalog.from_discovery()
+                    logger.info(
+                        "app.model_catalog_ready",
+                        providers=[d.provider for d in catalog.models],
+                        model_count=len(catalog.models),
+                    )
+                    llm_router = LLMRouter(model_catalog=catalog)
+
+                # Wire hook bus subscribers for LLM observability
+                hook_subscriber = LoggingHookSubscriber()
+                llm_router._hook_bus.subscribe(
+                    "on_llm_prompt", hook_subscriber.on_prompt
+                )
+                llm_router._hook_bus.subscribe(
+                    "on_llm_response", hook_subscriber.on_response
+                )
+
                 policy = ActionPolicy()
                 idempotency_store = InMemoryIdempotencyStore()
 
@@ -133,6 +164,9 @@ def create_app(
                 pass
 
     app = FastAPI(title="github-auto-maintainer-webhook-ingress", lifespan=lifespan)
+
+    # Add observability middleware
+    app.add_middleware(RequestTimingMiddleware)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

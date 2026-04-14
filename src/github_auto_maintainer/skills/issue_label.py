@@ -137,4 +137,5 @@ class IssueLabelSkill(BaseSkill):
             complexity_used=complexity,
             elapsed_seconds=round(elapsed, 3),
             planned_actions=planned_actions,
+            escalation_count=response.escalation_count,
         )

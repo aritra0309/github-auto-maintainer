@@ -122,4 +122,5 @@ class IssueTriageSkill(BaseSkill):
             task_type_used=task_type,
             complexity_used=complexity,
             elapsed_seconds=round(elapsed, 3),
+            escalation_count=response.escalation_count,
         )

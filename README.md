@@ -11,95 +11,212 @@ Maintainers spend substantial time on repeatable but important work: understandi
 This project focuses on that control layer:
 
 - Predictable, policy-driven routing decisions
-- Provider and model portability (OpenAI, Anthropic, Grok, Ollama)
+- Provider and model portability (OpenAI, Anthropic, Google Gemini, Grok, Ollama, OpenRouter, NVIDIA NIM)
 - Explicit escalation paths when models fail to produce valid output
 - Safe-by-default runtime behavior with mandatory dry-run mode
 
 ## How it differs from Copilot, Claude, or Codex-style assistants
 
-Tools like Copilot, Claude, and Codex help a developer in the moment — writing code, reviewing changes, suggesting fixes. GitHub Auto-Maintainer solves a different problem: **what happens around the code**, not inside a single coding session.
+Tools like Copilot, Claude, and Codex help a developer in the moment — writing code, reviewing changes, suggesting fixes. GitHub Auto-Maintainer solves a different problem: **what happens around the code**, not inside a file.
 
-- **Event-driven** (webhooks → queue → orchestrator), not prompt-driven
-- **Deterministic model routing** — model choice is never delegated to an LLM
-- **Multi-provider** — OpenAI, Anthropic, Grok, and Ollama, swappable per task type
-- **Safety-first** — signature verification, idempotency, dry-run mode, and allowlists before any write action
-- **Auditable** — structured logging of every routing decision, skill result, and action outcome
+It watches the repository's event stream (issues opened, PRs submitted, labels applied, comments posted), decides what kind of work each event represents, routes it to the right model tier, and takes safe, idempotent write actions — or opens a patch PR — without a human in the loop.
+
+The design goal is not to replace human judgment. It is to eliminate the mechanical parts of maintainership so humans can focus on the parts that actually require judgment.
+
+
+## Getting started
+
+### 1. Create a GitHub App
+
+Go to **GitHub → Settings → Developer settings → GitHub Apps → New GitHub App**.
+
+| Field | Value |
+|---|---|
+| Homepage URL | Any URL (e.g. your repo URL) |
+| Webhook URL | Your server's `/webhook` endpoint (see step 4) |
+| Webhook secret | Generate a random secret — you'll put this in `.env` |
+| Active | ✅ |
+
+**Repository permissions (read & write):**
+
+| Permission | Access |
+|---|---|
+| Contents | Read & write (needed for branch/commit in auto-fix) |
+| Issues | Read & write |
+| Pull requests | Read & write |
+| Metadata | Read-only (required) |
+
+**Subscribe to events:**
+
+- `Issues`
+- `Issue comment`
+- `Pull request`
+- `Pull request review`
+
+Click **Create GitHub App**. On the next page:
+
+- Note your **App ID** (shown at the top).
+- Scroll to **Private keys** → **Generate a private key**. Save the downloaded `.pem` file.
+
+---
+
+### 2. Install the App on a repository
+
+Go to your new App's page → **Install App** → select the repo(s) you want it to manage.
+
+---
+
+### 3. Configure `.env`
+
+```bash
+cp .env.example .env
+```
+
+Open `.env` and fill in:
+
+```env
+# GitHub App credentials
+GITHUB_APP_ID=123456
+GITHUB_APP_PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----
+<paste the full contents of your .pem file here>
+-----END RSA PRIVATE KEY-----"
+GITHUB_WEBHOOK_SECRET=your-webhook-secret
+
+# At least one LLM provider key
+ANTHROPIC_API_KEY=sk-ant-...
+# OPENAI_API_KEY=sk-...
+# GOOGLE_API_KEY=...
+
+# Safety: restrict which repos the bot can act on
+GITHUB_ALLOWED_REPOSITORIES=owner/repo,owner/other-repo
+
+# Start in dry-run mode (default). No writes will happen until you set this to false.
+DRY_RUN=true
+
+# Optional: enable the auto-fix pipeline
+AUTO_FIX_ENABLED=false
+
+# Optional: coloured console logs for local dev
+LOG_FORMAT=dev
+```
+
+---
+
+### 4. Start the server
+
+**Local dev (Python):**
+
+```bash
+python -m pip install -e '.[dev]'
+make run
+# Server starts on http://localhost:8000
+```
+
+**Local dev (Docker):**
+
+```bash
+docker compose up
+# Server starts on http://localhost:8000
+```
+
+---
+
+### 5. Expose your local server to GitHub (local dev only)
+
+GitHub needs a public URL to deliver webhooks. Use [ngrok](https://ngrok.com):
+
+```bash
+ngrok http 8000
+# Outputs something like: https://abc123.ngrok-free.app
+```
+
+Go back to your GitHub App settings → **Webhook URL** → update it to:
+
+```
+https://abc123.ngrok-free.app/webhook
+```
+
+---
+
+### 6. Verify the connection
+
+Open an issue or PR in your installed repo. You should see:
+
+- A webhook delivery appear under your GitHub App → **Advanced → Recent Deliveries**
+- A log line in your server output showing the event was received and processed
+- In dry-run mode: log output showing what *would* have been written, but no actual GitHub actions
+
+---
+
+### 7. Enable write actions when ready
+
+Once you're satisfied with the dry-run output:
+
+```env
+DRY_RUN=false
+GITHUB_ALLOWED_REPOSITORIES=owner/repo   # keep this set
+```
+
+Restart the server. The bot will now post comments, add labels, open PR reviews, and (if `AUTO_FIX_ENABLED=true`) open patch PRs.
+
+---
+
+### Production deployment
+
+See [`docs/deploy.md`](docs/deploy.md) for Docker, GitHub Actions workflow mode (serverless), and bare-metal deployment. See [`docs/security.md`](docs/security.md) for the full security model.
 
 ## What is implemented
 
 ### Phase 1 — Deterministic Routing + Typed Settings ✅
 
-Model catalog, typed settings, task types, routing policy. LLM router with `complete()`, `complete_task()`, and `complete_with_escalation()`. Hook bus for observability. Four provider adapters. Error hierarchy, startup validation, frozen dataclass value objects.
+Auto-discovery model catalog (`core/model_catalog.py`) that detects available providers from API keys, scans LiteLLM's live model registry, computes 6-tier cost bucketing from real pricing data, and auto-assigns task types. Typed settings, task types, routing policy, LLM router with `complete()` / `complete_task()` / `complete_with_escalation()`, hook bus for prompt/response observability, and a unified LiteLLM provider adapter supporting 100+ backends.
 
 ### Phase 2 — Webhook Ingress + GitHub App Auth + Queue ✅
 
-FastAPI ingress with `/health` and `/webhook` endpoints. HMAC SHA-256 signature verification. GitHub App JWT generation and installation token retrieval. Event normalization into typed `NormalizedEvent` envelopes. In-memory async job queue (swappable for Redis/Celery).
+FastAPI ingress with `/health` and `/webhook` endpoints. Webhook signature verification via HMAC SHA-256. GitHub App JWT generation and installation token retrieval. Event normalization into typed `NormalizedEvent` envelopes. In-memory async job queue abstraction, swappable for Redis or Celery.
 
 ### Phase 3 — GitHub Client + Diff Parser + Read-Only Skills ✅
 
-Async GitHub REST client with typed return objects, pagination, and error mapping. Pure unified diff parser. Skill framework with `SkillContext`, generic `SkillResult[T]`, and `BaseSkill` ABC. Two read-only triage skills (PR and issue). Prompt templates loaded via `importlib.resources`.
+Async read-only GitHub REST client with typed return objects, pagination, and error mapping. Pure unified diff parser handling binary, rename, add, delete, and truncated diffs. Skill framework with `SkillContext`, generic `SkillResult[T]`, and `BaseSkill` ABC. Typed decision parsing with `from_llm_response()`. Two read-only skills: `PRTriageSkill` and `IssueTriageSkill`. No write operations in this phase.
 
 ### Phase 4 — Orchestrator + First Write Actions (Idempotent) ✅
 
-Full orchestrator replacing the Phase 3 dispatcher. Three write-capable skills:
-
-| Skill | Trigger | Action |
-|---|---|---|
-| **PRSummarySkill** | `pull_request.opened` | Posts a review summary comment on the PR |
-| **IssueLabelSkill** | `issues.opened` | Adds classification labels to the issue |
-| **IssueResponseSkill** | `issues.opened` | Posts an initial triage response comment |
-
-Safety layer:
-- **Action protocol** — typed `ActionRequest` with deterministic fingerprinting (content-hash aware)
-- **Idempotency** — delivery ID + action fingerprint (including body content hash) prevents duplicate writes
-- **Dry-run mode** — enabled by default; writes are blocked until explicitly turned off
-- **Allowlist gating** — repo and event type allowlists checked before skill execution (saves LLM/API cost)
-- **Fault isolation** — one skill or action failure does not stop others in the same event
+`ActionRequest` protocol with content-aware SHA-256 fingerprints for deduplication. Three write action types: `IssueCommentAction`, `AddLabelsAction`, `PRReviewSummaryAction`. Idempotency layer keyed on delivery ID + action fingerprint. `ActionPolicy` with `DRY_RUN` mode (default `true`), repo allowlist, and event allowlist. Three write-capable skills: `PRSummarySkill`, `IssueLabelSkill`, `IssueResponseSkill`. Full orchestrator replacing the Phase 3 dispatcher.
 
 ### Phase 5 — Controlled Auto-Fix Pipeline (Branch/Commit/PR) ✅
 
-LLM-driven auto-fix pipeline triggered by issue labels or commands:
+`AutoFixSkill` triggered by `issues.labeled` (`auto-fix`) or `issue_comment.created` (`/auto-fix`). Pipeline: fetch issue → LLM patch generation → safety validation → branch/commit/PR via REST API → follow-up comment with PR link. Safety module blocks dangerous paths, extensions, and oversized diffs. All git operations use the GitHub REST API — no subprocess git, no `shell=True`. SQLite-backed run metadata persistence via `aiosqlite`. Three new action types: `CreateBranchAction`, `CommitPatchAction`, `CreatePullRequestAction`.
 
-| Trigger | Flow | Result |
-|---|---|---|
-| `issues.labeled` "auto-fix" | Issue → LLM → safety check → branch/commit/PR | Fix PR opened, comment posted |
-| `issue_comment.created` "/auto-fix" | Same pipeline | Same result |
+### Phase 6 — Deployment + Observability + Portfolio Polish ✅
 
-Safety layer:
-- **Path/extension blocking** — `.github/workflows`, `.env`, `*.pem`, secret directories blocked by default
-- **Diff size limits** — max lines changed, max files changed, per-file line limits
-- **Allowed commands only** — ruff, mypy, pytest templates (no arbitrary execution from model output)
-- **Path traversal rejection** — `..` in any file path is rejected
-- **Run metadata persistence** — every pipeline run tracked in SQLite with full audit trail
-
-**370 tests** pass across unit, skill, orchestrator, automation, and integration test suites.
+Structured logging via structlog — JSON in production, coloured console in dev. Secret redaction on all log output. `escalation_count` field on `LLMResponse`. `LoggingHookSubscriber` wired to the hook bus. `RequestTimingMiddleware` logging per-request latency and injecting `X-Request-ID`. Multi-stage Dockerfile with non-root user, health check, and SQLite volume. `docker-compose.yml` for one-command local deployment. Deployment, security, and ops docs. GitHub Actions workflow mode with a single-shot CLI for serverless event processing. Resilience tests (duplicate delivery, LLM outage, GitHub 429), container smoke tests, and CLI tests.
 
 ## End-to-end request flow
 
 ```
 GitHub webhook
-  → FastAPI ingress (HMAC signature verification)
-  → Event normalization → NormalizedEvent
+  → FastAPI ingress (server/app.py)
+  → HMAC signature verification
+  → Event normalization (NormalizedEvent)
   → Async job queue
   → Orchestrator
       → Allowlist check (repo + event type)
       → Match event to skills
-      → GitHub App JWT → installation token → GitHubClient
-      → Execute skills, collect planned actions
-      → Execute actions (idempotency check → dry-run gate → write)
-      → Structured JSON logging of every outcome
+      → Generate GitHub App JWT → fetch installation token → create GitHubClient
+      → Execute matching skills, collect planned_actions
+      → Execute actions with idempotency check + dry-run gate
+      → Structured JSON log of outcomes
 
-Auto-fix path (issues.labeled "auto-fix" or issue_comment "/auto-fix"):
+Auto-fix path:
+  issues.labeled "auto-fix" OR issue_comment.created "/auto-fix"
       → AutoFixSkill
-          → Fetch issue → LLM patch generation → safety validation
-          → Create branch → commit files → open PR (via REST API)
-          → Post issue comment with PR link
-          → Persist run metadata to SQLite
+          → Fetch issue details
+          → LLM patch generation
+          → Safety validation
+          → create branch → commit files → open PR (all via REST API)
+          → Follow-up IssueCommentAction with PR link
+          → Run metadata persisted to SQLite
 ```
-
-## What is next
-
-**Phase 6 — Deployment + Observability**: Dockerfile, docker-compose, metrics/logging (event_id, delivery_id, selected_model, escalation_count, latency), container smoke tests, staging repo soak tests.
 
 ## Run locally
 
@@ -124,89 +241,64 @@ make run
 make run-local
 ```
 
+### Docker (one command)
+
+```bash
+docker compose up
+```
+
+See `docs/deploy.md` for full deployment instructions, `docs/security.md` for the security model, and `docs/ops.md` for operational runbook.
+
 ### Key environment variables
 
-| Variable | Default | Description |
+| Variable | Required | Description |
 |---|---|---|
-| `DEFAULT_PROVIDER` | `openai` | LLM provider for routing |
-| `DEFAULT_MODEL` | `gpt-5.4-mini` | Default model name |
-| `GITHUB_APP_ID` | — | GitHub App ID |
-| `GITHUB_APP_PRIVATE_KEY_PATH` | — | Path to GitHub App private key PEM file |
-| `GITHUB_WEBHOOK_SECRET` | — | Webhook HMAC secret |
-| `DRY_RUN` | `true` | Block all GitHub writes when `true` |
-| `GITHUB_ALLOWED_REPOSITORIES` | _(empty = allow all)_ | Comma-separated repo allowlist |
-| `GITHUB_ALLOWED_EVENTS` | _(empty = allow all)_ | Comma-separated event allowlist |
-| `AUTO_FIX_ENABLED` | `true` | Enable/disable the auto-fix pipeline |
-| `RUN_STORE_PATH` | `runs.db` | SQLite database path for auto-fix run metadata |
-| `AUTO_FIX_TRIGGER_LABEL` | `auto-fix` | Issue label that triggers auto-fix |
-| `AUTO_FIX_TRIGGER_COMMAND` | `/auto-fix` | Issue comment command that triggers auto-fix |
+| `GITHUB_APP_ID` | Yes | GitHub App ID |
+| `GITHUB_APP_PRIVATE_KEY` | Yes | PEM-encoded private key |
+| `GITHUB_WEBHOOK_SECRET` | Yes | Webhook secret for HMAC verification |
+| `ANTHROPIC_API_KEY` | At least one | LLM provider key |
+| `OPENAI_API_KEY` | At least one | LLM provider key |
+| `GOOGLE_API_KEY` | At least one | LLM provider key |
+| `GITHUB_ALLOWED_REPOSITORIES` | Recommended | Comma-separated `owner/repo` allowlist |
+| `DRY_RUN` | — | Default `true`. Set `false` to enable write actions |
+| `AUTO_FIX_ENABLED` | — | Default `false`. Set `true` to enable the auto-fix pipeline |
+| `LOG_FORMAT` | — | `json` (default) or `dev` for coloured console output |
 
 ## Repository layout
 
 ```
 src/github_auto_maintainer/
-├── core/                  # Runtime core
-│   ├── orchestrator.py    # Event-to-action pipeline
-│   ├── llm_router.py      # Deterministic model routing
-│   ├── routing_policy.py   # Multi-key model ranking
-│   ├── actions.py          # Action protocol + 6 concrete types
-│   ├── action_policy.py    # Dry-run, allowlists
-│   ├── idempotency.py      # Deduplication layer
-│   ├── run_store.py        # Auto-fix run metadata (SQLite)
-│   ├── job_queue.py        # Async queue abstraction
-│   ├── model_catalog.py    # YAML model descriptors
-│   ├── task_types.py       # TaskType + TaskComplexity enums
-│   ├── hooks.py            # LLM observability hooks
-│   └── settings.py         # Typed runtime settings
-├── github/                # GitHub integration
-│   ├── client.py           # Async REST client (read + write + git)
-│   ├── auth.py             # App JWT + installation tokens
-│   ├── events.py           # Event normalization
-│   ├── diff_parser.py      # Unified diff parser
-│   ├── errors.py           # GitHub error hierarchy
-│   └── retry.py            # Transient failure retry helper
-├── automation/            # Auto-fix pipeline (Phase 5)
-│   ├── patch_worker.py     # AutoFixSkill (issue → LLM → PR)
-│   ├── safety.py           # Path/diff/command safety guardrails
-│   ├── git_ops.py          # REST-based branch/commit/PR operations
-│   └── check_runner.py     # Async command runner (future use)
-├── server/                # FastAPI application
-│   ├── app.py              # Ingress + lifespan wiring
-│   └── webhooks.py         # HMAC signature verification
-├── skills/                # Event processing skills
-│   ├── pr_summary.py       # PR review summary (write)
-│   ├── issue_label.py      # Issue labeling (write)
-│   ├── issue_response.py   # Issue response (write)
-│   ├── pr_triage.py        # PR triage (read-only)
-│   ├── issue_triage.py     # Issue triage (read-only)
-│   ├── decisions.py        # Typed LLM output parsing
-│   ├── payload.py          # Webhook payload extraction
-│   └── base.py             # Skill framework
-├── prompts/               # LLM prompt templates (.md)
-├── providers/             # LLM provider adapters
-│   ├── openai.py, anthropic.py, grok.py, ollama.py
-│   └── base.py
-└── tools/                 # Helper integrations
+├── core/           # Router, catalog, orchestrator, actions, idempotency, queue, logging
+├── github/         # REST client, auth, events, diff parser, retry, errors
+├── skills/         # Skill framework, decision types, all skill implementations
+├── automation/     # Auto-fix pipeline, safety, git ops, check runner
+├── server/         # FastAPI app, webhook handler, middleware
+├── providers/      # LiteLLM adapter
+├── prompts/        # Prompt templates (loaded via importlib.resources)
+└── cli.py          # Single-shot CLI for GitHub Actions workflow mode
 
-config/models.yaml          # Model catalog
-tests/                      # 370 tests (unit, skill, orchestrator, automation, integration)
+tests/
+├── core/           # Unit tests for router, catalog, orchestrator, actions
+├── github/         # Unit tests for client, auth, diff parser
+├── skills/         # Unit tests for all skills and decision types
+├── automation/     # Unit tests for auto-fix pipeline and safety
+├── integration/    # End-to-end happy path, dry-run, idempotency, auto-fix
+├── resilience/     # Chaos tests: duplicate delivery, LLM outage, GitHub 429
+└── smoke/          # Container smoke tests (requires Docker)
+
+docs/
+├── deploy.md       # Deployment guide (Docker, GitHub Actions, bare metal)
+├── security.md     # Security model and threat surface
+└── ops.md          # Operational runbook
 ```
 
 ## Engineering and safety contract
 
-**Constraints:**
-- Python ≥3.12, mypy strict, ruff, pytest
-- Frozen dataclasses for all value objects
-- Async architecture for all runtime paths
-- Phased execution: one capability group at a time, tests first
-
-**Safety requirements:**
-- Webhook signature verification before processing
-- Idempotency before any GitHub write (delivery ID + action fingerprint)
-- Mandatory dry-run mode before enabling writes
-- Allowlist gating before skill execution
-- Action fault isolation (one failure does not stop others)
-- No secrets in logs
-- Safety validation before any auto-fix git write (blocked paths, extensions, diff size, path traversal)
-- No subprocess git, no `shell=True` — all git operations use GitHub REST API
-- Auto-fix run metadata persisted at every pipeline stage
+- **Routing is deterministic.** Model selection is never delegated to an LLM.
+- **Dry-run by default.** `DRY_RUN=true` is the default. Write actions require an explicit opt-in.
+- **Allowlist gating.** Every event is checked against the repo and event allowlists before any skill runs.
+- **Idempotency on all writes.** Every GitHub write action is keyed on delivery ID + content fingerprint. Replays are no-ops.
+- **Safety before git.** The auto-fix pipeline validates every patch against blocked paths, extensions, and size limits before any branch or commit is created.
+- **No secrets in logs.** All log output passes through a redaction layer before emission.
+- **Single provider adapter.** All LLM calls go through one `LiteLLMProvider`. Adding a new provider is env-var-only — set the API key, restart.
+- **No subprocess git.** All git operations use the GitHub REST API directly.

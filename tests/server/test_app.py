@@ -11,7 +11,22 @@ from fastapi.testclient import TestClient
 
 from github_auto_maintainer.core.job_queue import InMemoryJobQueue
 from github_auto_maintainer.github.events import NormalizedEvent
+from github_auto_maintainer.core.model_catalog import ModelCatalog, ModelDescriptor
+from github_auto_maintainer.core.task_types import TaskType
 from github_auto_maintainer.server.app import create_app
+
+
+def _fake_catalog() -> ModelCatalog:
+    """Return a minimal catalog for tests that reach the lifespan catalog build."""
+    desc = ModelDescriptor(
+        provider="openai",
+        model="gpt-4o-mini",
+        context_window=128000,
+        cost_tier=1,
+        suited_for=frozenset(TaskType),
+        litellm_model="openai/gpt-4o-mini",
+    )
+    return ModelCatalog(models=(desc,))
 
 
 def _signature(secret: str, body: bytes) -> str:
@@ -134,7 +149,7 @@ def test_lifespan_skips_dispatcher_when_env_unset(
     recording_logger = _RecordingLogger()
     monkeypatch.setattr(
         "github_auto_maintainer.server.app.structlog.get_logger",
-        lambda: recording_logger,
+        lambda *_args, **_kwargs: recording_logger,
     )
 
     _RecordingDispatcher.reset()
@@ -162,7 +177,7 @@ def test_lifespan_skips_dispatcher_when_key_file_missing(
     recording_logger = _RecordingLogger()
     monkeypatch.setattr(
         "github_auto_maintainer.server.app.structlog.get_logger",
-        lambda: recording_logger,
+        lambda *_args, **_kwargs: recording_logger,
     )
 
     _RecordingDispatcher.reset()
@@ -225,7 +240,13 @@ def test_lifespan_starts_dispatcher_when_key_path_valid(
     recording_logger = _RecordingLogger()
     monkeypatch.setattr(
         "github_auto_maintainer.server.app.structlog.get_logger",
-        lambda: recording_logger,
+        lambda *_args, **_kwargs: recording_logger,
+    )
+
+    # Mock auto-discovery so it doesn't need real API keys
+    monkeypatch.setattr(
+        "github_auto_maintainer.server.app.ModelCatalog.from_discovery",
+        staticmethod(lambda: _fake_catalog()),
     )
 
     app = create_app(webhook_secret="test-secret")

@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from typing import Protocol, runtime_checkable
 
 from github_auto_maintainer.core.llm_types import LLMMessage, LLMResponse
 
 
-class BaseLLMProvider(ABC):
-    """Abstract provider interface used by the LLM router."""
+@runtime_checkable
+class BaseLLMProvider(Protocol):
+    """Provider interface used by the LLM router.
 
-    @abstractmethod
+    Switched from ABC to Protocol so that any object with a matching
+    ``complete`` signature satisfies the contract — including test fakes
+    that do not explicitly subclass this type.
+    """
+
     async def complete(
         self,
         system: str,
         messages: Sequence[LLMMessage],
         max_tokens: int,
         temperature: float,
-    ) -> LLMResponse:
-        """Execute a completion request and return normalized response."""
+    ) -> LLMResponse: ...

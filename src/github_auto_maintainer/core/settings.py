@@ -2,16 +2,8 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-def default_model_catalog_path() -> Path:
-    """Return the default absolute path to config/models.yaml."""
-
-    return (Path(__file__).resolve().parents[3] / "config" / "models.yaml").resolve()
 
 
 class AppSettings(BaseSettings):
@@ -23,9 +15,5 @@ class AppSettings(BaseSettings):
         extra="ignore",
     )
 
-    default_provider: str = Field(default="openai", validation_alias="DEFAULT_PROVIDER")
-    default_model: str = Field(default="gpt-5.4-mini", validation_alias="DEFAULT_MODEL")
-    model_catalog_path: Path = Field(
-        default_factory=default_model_catalog_path,
-        validation_alias="MODEL_CATALOG_PATH",
-    )
+    default_provider: str = Field(default="", validation_alias="DEFAULT_PROVIDER")
+    default_model: str = Field(default="", validation_alias="DEFAULT_MODEL")

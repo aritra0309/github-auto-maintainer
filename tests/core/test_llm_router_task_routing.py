@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from pathlib import Path
+from collections.abc import Sequence
 
 import pytest
 from tenacity import wait_none
@@ -20,20 +19,21 @@ def _messages() -> list[LLMMessage]:
 
 
 def _catalog(*models: ModelDescriptor) -> ModelCatalog:
-    return ModelCatalog(models=tuple(models), source_path=Path("/tmp/test-catalog.yaml"))
+    return ModelCatalog(models=tuple(models))
 
 
 def _descriptor(
     *,
     provider: str,
     model: str,
-    cost_tier: TaskComplexity,
+    cost_tier: int,
     suited_for: set[TaskType],
     context_window: int = 1_000_000,
 ) -> ModelDescriptor:
     return ModelDescriptor(
         provider=provider,
         model=model,
+        litellm_model=f"{provider}/{model}",
         context_window=context_window,
         cost_tier=cost_tier,
         suited_for=frozenset(suited_for),
@@ -69,21 +69,14 @@ def _router(
     policy: RoutingPolicy | None,
     call_log: list[tuple[str, str]],
 ) -> LLMRouter:
-    def _factory(provider_name: str) -> Callable[[str], BaseLLMProvider]:
-        def build(model: str) -> BaseLLMProvider:
-            return RecordingProvider(provider_name=provider_name, model=model, call_log=call_log)
-
-        return build
+    def factory(provider: str, model: str, litellm_model: str) -> BaseLLMProvider:
+        _ = litellm_model
+        return RecordingProvider(provider_name=provider, model=model, call_log=call_log)
 
     return LLMRouter(
         config=RouterConfig(default_provider="openai", default_model="gpt-5.4-mini"),
         retry_config=RouterRetryConfig(max_attempts=1, wait_strategy=wait_none()),
-        provider_factories={
-            "openai": _factory("openai"),
-            "anthropic": _factory("anthropic"),
-            "grok": _factory("grok"),
-            "ollama": _factory("ollama"),
-        },
+        provider_factory=factory,
         routing_policy=policy,
     )
 
@@ -94,13 +87,13 @@ async def test_complete_task_routes_without_explicit_provider_model() -> None:
         _descriptor(
             provider="openai",
             model="gpt-5.4-mini",
-            cost_tier=TaskComplexity.LOW,
+            cost_tier=1,
             suited_for={TaskType.TRIAGE},
         ),
         _descriptor(
             provider="ollama",
             model="llama4:scout",
-            cost_tier=TaskComplexity.LOW,
+            cost_tier=1,
             suited_for={TaskType.TRIAGE},
         ),
     )
@@ -127,13 +120,13 @@ async def test_complete_with_escalation_returns_early_when_validate_passes() -> 
         _descriptor(
             provider="openai",
             model="gpt-5.4-mini",
-            cost_tier=TaskComplexity.LOW,
+            cost_tier=1,
             suited_for={TaskType.TRIAGE},
         ),
         _descriptor(
             provider="anthropic",
             model="claude-sonnet-4-6",
-            cost_tier=TaskComplexity.MEDIUM,
+            cost_tier=3,
             suited_for={TaskType.TRIAGE},
         ),
     )
@@ -160,19 +153,19 @@ async def test_complete_with_escalation_escalates_when_validation_fails() -> Non
         _descriptor(
             provider="openai",
             model="gpt-5.4-mini",
-            cost_tier=TaskComplexity.LOW,
+            cost_tier=1,
             suited_for={TaskType.TRIAGE},
         ),
         _descriptor(
             provider="anthropic",
             model="claude-sonnet-4-6",
-            cost_tier=TaskComplexity.MEDIUM,
+            cost_tier=3,
             suited_for={TaskType.TRIAGE},
         ),
         _descriptor(
             provider="grok",
             model="grok-4.20-0309-reasoning",
-            cost_tier=TaskComplexity.HIGH,
+            cost_tier=5,
             suited_for={TaskType.TRIAGE},
         ),
     )
@@ -202,19 +195,19 @@ async def test_complete_with_escalation_returns_highest_tier_on_best_effort() ->
         _descriptor(
             provider="openai",
             model="gpt-5.4-mini",
-            cost_tier=TaskComplexity.LOW,
+            cost_tier=1,
             suited_for={TaskType.TRIAGE},
         ),
         _descriptor(
             provider="anthropic",
             model="claude-sonnet-4-6",
-            cost_tier=TaskComplexity.MEDIUM,
+            cost_tier=3,
             suited_for={TaskType.TRIAGE},
         ),
         _descriptor(
             provider="grok",
             model="grok-4.20-0309-reasoning",
-            cost_tier=TaskComplexity.HIGH,
+            cost_tier=5,
             suited_for={TaskType.TRIAGE},
         ),
     )
@@ -245,7 +238,7 @@ async def test_complete_with_escalation_raises_when_constraints_remove_all_candi
         _descriptor(
             provider="anthropic",
             model="claude-sonnet-4-6",
-            cost_tier=TaskComplexity.MEDIUM,
+            cost_tier=3,
             suited_for={TaskType.PATCH_GENERATION},
         )
     )
@@ -261,7 +254,7 @@ async def test_complete_with_escalation_raises_when_constraints_remove_all_candi
             task_type=TaskType.PATCH_GENERATION,
             complexity=TaskComplexity.LOW,
             validate=lambda _: True,
-            hint=RoutingHint(max_cost_tier=TaskComplexity.LOW),
+            hint=RoutingHint(max_cost_tier=1),
         )
 
     assert calls == []
@@ -274,17 +267,17 @@ async def test_catalog_is_loaded_once_per_router_instance(monkeypatch: pytest.Mo
         _descriptor(
             provider="openai",
             model="gpt-5.4-mini",
-            cost_tier=TaskComplexity.LOW,
+            cost_tier=1,
             suited_for={TaskType.TRIAGE},
         )
     )
 
-    def fake_from_yaml(cls: type[ModelCatalog], path: object) -> ModelCatalog:
+    def fake_from_discovery(cls: type[ModelCatalog]) -> ModelCatalog:
         _ = cls
-        loaded_paths.append(str(path))
+        loaded_paths.append("discovery")
         return catalog
 
-    monkeypatch.setattr(ModelCatalog, "from_yaml", classmethod(fake_from_yaml))
+    monkeypatch.setattr(ModelCatalog, "from_discovery", classmethod(fake_from_discovery))
     calls: list[tuple[str, str]] = []
     router = _router(policy=None, call_log=calls)
 

@@ -1,0 +1,22 @@
+# Optional overrides for auto-discovered models.
+# This file is NOT required — the system works with zero config beyond API keys.
+#
+# Schema:
+#   overrides:
+#     - model: "provider/model-name"    # must match the litellm_model key
+#       exclude: true                   # drop this model from the catalog
+#     - model: "provider/model-name"
+#       cost_tier: 4                    # override tier (0–5)
+#       suited_for:                     # override task assignment
+#         - deep_review
+#         - patch_generation
+#
+# Examples:
+#   overrides:
+#     - model: "anthropic/claude-opus-4-6"
+#       exclude: true
+#     - model: "openai/gpt-5.4"
+#       cost_tier: 4
+#       suited_for: [deep_review, patch_generation]
+
+overrides: []

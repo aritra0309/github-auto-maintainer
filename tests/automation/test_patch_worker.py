@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -60,17 +59,17 @@ def _make_router(golden_response: str) -> LLMRouter:
             ModelDescriptor(
                 provider="fake",
                 model="fake-model",
+                litellm_model="fake/fake-model",
                 context_window=8000,
-                cost_tier=TaskComplexity.LOW,
+                cost_tier=1,
                 suited_for=frozenset({TaskType.PATCH_GENERATION}),
             ),
         ),
-        source_path=Path("/tmp/test-catalog.yaml"),
     )
     provider = _FakeProvider(golden_response)
     return LLMRouter(
         config=RouterConfig(default_provider="fake", default_model="fake-model"),
-        provider_factories={"fake": lambda model: provider},
+        provider_factory=lambda p, m, lm: provider,
         model_catalog=catalog,
         routing_policy=RoutingPolicy(catalog),
     )
